@@ -79,7 +79,7 @@ class PipelineOrchestrator:
             await self._set_stage(job_id, AgentStage.TREND, 5)
             trends = await self._retry(
                 self.trend_agent.analyze, job_id,
-                niche=niche_name, job_id=job_id
+                niche=niche_name
             )
             await self._log(job_id, AgentStage.TREND, f"Found {len(trends.get('topics',[]))} trending topics")
             await self._set_stage(job_id, AgentStage.TREND, 10)
@@ -88,7 +88,7 @@ class PipelineOrchestrator:
             await self._set_stage(job_id, AgentStage.STRATEGY, 12)
             strategies = await self._retry(
                 self.strategy_agent.generate, job_id,
-                trends=trends, count=count, job_id=job_id
+                trends=trends, count=count
             )
             await self._log(job_id, AgentStage.STRATEGY, f"Generated {len(strategies)} video strategies")
             await self._set_stage(job_id, AgentStage.STRATEGY, 15)
@@ -159,7 +159,7 @@ class PipelineOrchestrator:
         await self._set_stage(job_id, AgentStage.SCRIPT, base_pct + step)
         script = await self._retry(
             self.script_agent.generate, job_id,
-            strategy=strategy, job_id=job_id
+            strategy=strategy
         )
         await self._log(job_id, AgentStage.SCRIPT, f"[{idx+1}] Script: \"{script.get('hook',{}).get('text','')[:50]}\"")
 
@@ -167,7 +167,7 @@ class PipelineOrchestrator:
         await self._set_stage(job_id, AgentStage.VISUAL, base_pct + step * 2)
         image_paths = await self._retry(
             self.visual_agent.generate, job_id,
-            script=script, job_id=job_id
+            script=script
         )
         await self._log(job_id, AgentStage.VISUAL, f"[{idx+1}] {len(image_paths)} images ready")
 
@@ -175,7 +175,7 @@ class PipelineOrchestrator:
         await self._set_stage(job_id, AgentStage.VOICEOVER, base_pct + step * 3)
         audio_path = await self._retry(
             self.voiceover_agent.generate, job_id,
-            script=script, job_id=job_id
+            script=script
         )
         await self._log(job_id, AgentStage.VOICEOVER, f"[{idx+1}] Audio ready")
 
@@ -194,7 +194,7 @@ class PipelineOrchestrator:
         await self._set_stage(job_id, AgentStage.SEO, base_pct + step * 4 + step // 2)
         seo = await self._retry(
             self.seo_agent.generate, job_id,
-            strategy=strategy, script=script, job_id=job_id
+            strategy=strategy, script=script
         )
         await self._log(job_id, AgentStage.SEO, f"[{idx+1}] Caption: \"{seo.get('title','')[:50]}\"")
 
