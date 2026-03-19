@@ -58,20 +58,20 @@ Return JSON:
   "tone": "energetic|calm|urgent|funny|inspiring|serious",
   "image_prompts": [
     {{
-      "prompt": "vivid AI image description, dramatic lighting, cinematic, {niche} theme",
-      "mood": "visual mood"
+      "prompt": "5-8 word visual description e.g. red mustang on highway at sunset",
+      "mood": "dramatic"
     }},
     {{
-      "prompt": "vivid AI image description, dramatic lighting, cinematic, {niche} theme",
-      "mood": "visual mood"
+      "prompt": "5-8 word visual description e.g. engine close-up roaring power",
+      "mood": "intense"
     }},
     {{
-      "prompt": "vivid AI image description, dramatic lighting, cinematic, {niche} theme",
-      "mood": "visual mood"
+      "prompt": "5-8 word visual description",
+      "mood": "cinematic"
     }},
     {{
-      "prompt": "vivid AI image description, dramatic lighting, cinematic, {niche} theme",
-      "mood": "visual mood"
+      "prompt": "5-8 word visual description",
+      "mood": "epic"
     }}
   ]
 }}
