@@ -1,11 +1,9 @@
 """
 Agent 6: Video Assembly Agent
-Optimizado para Railway 512MB RAM:
-- Resolucao 720x1280 (metade da RAM vs 1080x1920)
-- Imagens processadas UMA a UMA (nao em simultaneo)
-- preset ultrafast (menos CPU/RAM)
-- FPS 25 em vez de 30
-- Threads limitadas no FFmpeg
+- Resolucao 1080x1920 (qualidade original)
+- Duracao respeitada: audio e cortado/padded para bater certo com o target
+- Imagens processadas uma a uma (low RAM)
+- ultrafast preset, 1 thread
 """
 import asyncio
 import json
@@ -17,10 +15,8 @@ from backend.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Resolucao reduzida para caber em 512MB RAM
-# 720x1280 = metade da memoria vs 1080x1920, qualidade ainda excelente para mobile
-W, H = 720, 1280
-FPS  = 25
+W, H = 1080, 1920
+FPS  = 30
 
 
 class VideoAssemblyAgent:
@@ -33,7 +29,10 @@ class VideoAssemblyAgent:
         job_id: str = "",
     ) -> dict:
         if not image_paths:
-            raise ValueError(f"[{job_id}] No images to assemble")
+            raise ValueError(f"[{job_id}] No images")
+
+        # Duracao alvo (do script ou fallback para audio real)
+        target_dur = float(script.get("target_duration_sec", 0))
 
         logger.info(f"[{job_id}] Assembling {len(image_paths)} images @ {W}x{H}")
 
@@ -45,16 +44,28 @@ class VideoAssemblyAgent:
         thumb_path   = os.path.join(settings.OUTPUT_DIR, out_filename.replace(".mp4", "_thumb.jpg"))
 
         try:
-            # 1 - Audio duration
-            duration     = await self._audio_duration(audio_path)
-            img_duration = duration / len(image_paths)
+            # 1 - Duracao real do audio
+            audio_dur = await self._audio_duration(audio_path)
 
-            # 2 - Scale images ONE BY ONE (not concurrent — saves RAM)
+            # Se target_dur foi definido e audio e mais curto, usa audio_dur
+            # (nao fazemos loop de audio — so garantimos que o video nao fica maior)
+            final_dur = audio_dur
+            if target_dur > 0 and audio_dur > target_dur:
+                # Cortar audio para bater com target
+                trimmed_audio = os.path.join(work_dir, "audio_trimmed.mp3")
+                await self._trim_audio(audio_path, trimmed_audio, target_dur)
+                audio_path = trimmed_audio
+                final_dur  = target_dur
+                logger.info(f"[{job_id}] Audio trimmed to {target_dur}s")
+
+            img_duration = final_dur / len(image_paths)
+
+            # 2 - Escalar imagens (uma a uma, menos RAM)
             scaled = await self._scale_images_sequential(image_paths, work_dir)
 
-            # 3 - SRT subtitles
+            # 3 - SRT
             srt_path = os.path.join(work_dir, "subs.srt")
-            self._make_srt(script, duration, srt_path)
+            self._make_srt(script, final_dur, srt_path)
 
             # 4 - Concat list
             concat_path = os.path.join(work_dir, "concat.txt")
@@ -64,28 +75,37 @@ class VideoAssemblyAgent:
                     f.write(f"duration {img_duration:.4f}\n")
                 f.write(f"file '{scaled[-1]}'\n")
 
-            # 5 - Assemble
+            # 5 - Montar video
             await self._ffmpeg_assemble(concat_path, audio_path, srt_path, out_path, job_id)
 
-            # 6 - Thumbnail (non-fatal)
+            # 6 - Thumbnail
             await self._extract_thumbnail(out_path, thumb_path)
 
             size_mb = round(os.path.getsize(out_path) / (1024 * 1024), 2)
-            logger.info(f"[{job_id}] Done: {out_filename} ({size_mb}MB, {duration:.1f}s)")
+            logger.info(f"[{job_id}] Done: {out_filename} ({size_mb}MB, {final_dur:.1f}s)")
 
             return {
-                "video_path":      out_path,
-                "thumbnail_path":  thumb_path,
-                "duration_sec":    round(duration, 2),
-                "file_size_mb":    size_mb,
-                "filename":        out_filename,
+                "video_path":     out_path,
+                "thumbnail_path": thumb_path,
+                "duration_sec":   round(final_dur, 2),
+                "file_size_mb":   size_mb,
+                "filename":       out_filename,
             }
 
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    async def _trim_audio(self, src: str, dst: str, duration: float):
+        cmd = [
+            "ffmpeg", "-y", "-i", src,
+            "-t", str(duration),
+            "-c", "copy",
+            dst,
+        ]
+        await self._run(cmd)
+
     async def _scale_images_sequential(self, image_paths: list, work_dir: str) -> list:
-        """Processa imagens UMA a UMA para minimizar uso de RAM."""
+        """Uma a uma para minimizar RAM."""
         out_paths = []
         for i, src in enumerate(image_paths):
             dst = os.path.join(work_dir, f"s_{i:03d}.jpg")
@@ -96,26 +116,22 @@ class VideoAssemblyAgent:
                     f"crop={W}:{H},"
                     f"format=yuv420p"
                 ),
-                "-q:v", "4",          # ligeiramente menos qualidade = menos RAM
-                "-threads", "1",      # 1 thread = menos RAM
+                "-q:v", "3",
+                "-threads", "1",
                 dst,
             ]
             await self._run(cmd)
             out_paths.append(dst)
-            logger.debug(f"Scaled image {i+1}/{len(image_paths)}")
         return out_paths
 
     async def _ffmpeg_assemble(
-        self, concat_path: str, audio_path: str,
-        srt_path: str, out_path: str, job_id: str
+        self, concat_path, audio_path, srt_path, out_path, job_id
     ):
         sub_style = (
-            "FontName=Arial,FontSize=18,Bold=1,"
+            "FontName=Arial,FontSize=20,Bold=1,"
             "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            "BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=80"
+            "BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=100"
         )
-
-        # Escapa o path para o filtro FFmpeg
         srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
 
         cmd = [
@@ -124,12 +140,12 @@ class VideoAssemblyAgent:
             "-i", audio_path,
             "-vf", f"subtitles='{srt_escaped}':force_style='{sub_style}'",
             "-c:v", "libx264",
-            "-preset", "ultrafast",  # Menos RAM/CPU que fast ou medium
-            "-crf", "28",            # Um pouco menos qualidade = ficheiro menor
-            "-threads", "1",         # 1 thread = menos RAM pico
+            "-preset", "ultrafast",   # menos RAM
+            "-crf", "26",
+            "-threads", "1",          # menos RAM
             "-c:a", "aac",
-            "-b:a", "128k",          # 128k suficiente (era 192k)
-            "-ar",  "44100",
+            "-b:a", "128k",
+            "-ar", "44100",
             "-movflags", "+faststart",
             "-pix_fmt", "yuv420p",
             "-r", str(FPS),
@@ -138,12 +154,12 @@ class VideoAssemblyAgent:
         ]
         await self._run(cmd)
 
-    async def _extract_thumbnail(self, video_path: str, thumb_path: str):
+    async def _extract_thumbnail(self, video_path, thumb_path):
         cmd = [
             "ffmpeg", "-y", "-i", video_path,
             "-ss", "1", "-vframes", "1",
-            "-vf", "scale=360:640",   # thumbnail pequeno
-            "-q:v", "5",
+            "-vf", "scale=540:960",
+            "-q:v", "4",
             thumb_path,
         ]
         try:
@@ -163,17 +179,14 @@ class VideoAssemblyAgent:
 
     def _make_srt(self, script: dict, total_dur: float, srt_path: str):
         segments = []
-
         hook = script.get("hook", {}).get("text", "")
         if hook:
             segments.append({"text": hook, "ratio": 0.15})
-
         body_ratio = 0.75 / max(len(script.get("body", [])), 1)
         for seg in script.get("body", []):
             t = seg.get("text", "")
             if t:
                 segments.append({"text": t, "ratio": body_ratio})
-
         cta = script.get("cta", {}).get("text", "")
         if cta:
             segments.append({"text": cta, "ratio": 0.10})
@@ -198,7 +211,7 @@ class VideoAssemblyAgent:
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     @staticmethod
-    def _wrap(text: str, max_chars: int = 38) -> str:
+    def _wrap(text: str, max_chars: int = 40) -> str:
         words = text.split()
         lines, line = [], []
         for w in words:

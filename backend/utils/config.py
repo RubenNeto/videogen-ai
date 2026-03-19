@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     OUTPUT_DIR: str = "./output/videos"
     TEMP_DIR: str = "./output/temp"
     VIDEO_QUALITY: str = "medium"
-    VIDEOS_PER_RUN: int = 3
+    VIDEOS_PER_RUN: int = 1
 
     # ── STORAGE (opcional) ───────────────────────────────
     AWS_ACCESS_KEY_ID: str = ""

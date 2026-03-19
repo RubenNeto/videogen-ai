@@ -2159,6 +2159,11 @@ function renderVideoGrid(videos) {
               📋 Caption
             </button>
           </div>
+          <div style="margin-top:6px;padding:0 7px">
+            <button class="overlay-btn" style="background:rgba(200,30,50,0.9);color:#fff;width:100%" onclick="event.stopPropagation();quickDeleteVideo('${v.id}','${(v.title||'video').replace(/'/g,'')}')" >
+              🗑 Delete
+            </button>
+          </div>
         </div>
         <div class="video-duration">${durationStr}</div>
       </div>
@@ -2266,6 +2271,20 @@ async function downloadVideo(videoId, title, isDemo = false) {
   a.download = (v.title || 'video').replace(/[^a-z0-9]/gi, '_').toLowerCase() + '.mp4';
   a.click();
   showToast('⬇ Downloading...', 'success');
+}
+
+async function quickDeleteVideo(videoId, title) {
+  if (!confirm(`Delete "${title}"?`)) return;
+  const v = S.videos.find(x => x.id === videoId);
+  if (!v) return;
+  if (!v.is_demo) {
+    try { await api('DELETE', `/api/videos/${videoId}`); } catch(e) {}
+  }
+  S.videos = S.videos.filter(x => x.id !== videoId);
+  renderVideoGrid(S.videos);
+  updateLibBadge();
+  updateStats();
+  showToast('🗑 Video deleted', 'info');
 }
 
 async function deleteCurrentVideo() {

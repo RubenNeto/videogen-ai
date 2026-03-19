@@ -44,6 +44,7 @@ Return JSON:
     "type": "follow|comment|save|share"
   }},
   "full_script": "complete script as single flowing text",
+  "target_duration_sec": 30,
   "word_count": 75,
   "tone": "energetic|calm|urgent|funny|inspiring|serious",
   "image_prompts": [
