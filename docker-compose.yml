@@ -1,0 +1,28 @@
+version: "3.9"
+
+# Para testar localmente antes do deploy:
+#   docker-compose up --build
+#   Abre http://localhost:8080
+
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      OUTPUT_DIR: /app/output/videos
+      TEMP_DIR: /app/output/temp
+      DATABASE_URL: sqlite+aiosqlite:////app/output/videogen.db
+    volumes:
+      # Persiste vídeos e base de dados entre restarts
+      - ./output:/app/output
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
