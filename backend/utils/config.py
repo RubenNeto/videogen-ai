@@ -99,13 +99,12 @@ class Settings(BaseSettings):
 
     @property
     def ffmpeg_preset(self) -> str:
-        return {"low": "ultrafast", "medium": "fast", "high": "medium"}.get(
-            self.VIDEO_QUALITY, "fast"
-        )
+        # ultrafast em todos os casos para Railway 512MB
+        return "ultrafast"
 
     @property
     def ffmpeg_crf(self) -> int:
-        return {"low": 28, "medium": 23, "high": 18}.get(self.VIDEO_QUALITY, 23)
+        return {"low": 30, "medium": 28, "high": 26}.get(self.VIDEO_QUALITY, 28)
 
     class Config:
         env_file = ".env"

@@ -39,11 +39,14 @@ class VisualAgent:
 
         logger.info(f"[{job_id}] Generating {len(image_prompts)} images (source priority: pexels→dalle→stability)")
 
-        tasks = [
-            self._get_image(ip, idx, job_id)
-            for idx, ip in enumerate(image_prompts)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Sequential to save RAM (concurrent image downloads spike memory)
+        results = []
+        for idx, ip in enumerate(image_prompts):
+            try:
+                r = await self._get_image(ip, idx, job_id)
+                results.append(r)
+            except Exception as e:
+                results.append(e)
 
         valid = [r for r in results if isinstance(r, str) and os.path.exists(r)]
         if not valid:
@@ -118,7 +121,7 @@ class VisualAgent:
 
             # Cycle through results to avoid same photo every time
             photo = photos[idx % len(photos)]
-            img_url = photo["src"]["large2x"]  # High-res portrait
+            img_url = photo["src"]["large"]  # High-res portrait
 
             img_resp = await http.get(img_url, timeout=30)
             img_resp.raise_for_status()
