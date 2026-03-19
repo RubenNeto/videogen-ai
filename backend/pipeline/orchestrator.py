@@ -33,7 +33,7 @@ class PipelineOrchestrator:
         self.assembly_agent  = VideoAssemblyAgent()
         self.seo_agent       = SEOAgent()
 
-    async def run(self, niche_id: str, niche_name: str, videos_count: int = None, job_id: str = None, target_duration_sec: int = 30, voice_id: str = 'male-uk') -> str:
+    async def run(self, niche_id: str, niche_name: str, videos_count: int = None, job_id: str = None, target_duration_sec: int = 30, voice_id: str = 'male-uk', image_source: str = 'pollinations') -> str:
         """Entry point. Recebe job_id ja criado pela API."""
         if not job_id:
             job_id = str(uuid.uuid4())
@@ -77,7 +77,8 @@ class PipelineOrchestrator:
                         job_id, niche_id, niche_name,
                         strategy, idx, count, base_pct, per_video_pct,
                         target_duration_sec=target_duration_sec,
-                        voice_id=voice_id
+                        voice_id=voice_id,
+                        image_source=image_source
                     )
                     video_ids.append(vid_id)
                 except Exception as e:
@@ -112,7 +113,8 @@ class PipelineOrchestrator:
         self, job_id, niche_id, niche_name,
         strategy, idx, total, base_pct, pct_budget,
         target_duration_sec: int = 30,
-        voice_id: str = 'male-uk'
+        voice_id: str = 'male-uk',
+        image_source: str = 'pollinations'
     ) -> str:
         video_id = str(uuid.uuid4())
         logger.info(f"[{job_id}] Video {idx+1}/{total}: {strategy.get('topic','?')}")
@@ -142,7 +144,7 @@ class PipelineOrchestrator:
         await self._set_stage(job_id, AgentStage.VISUAL, base_pct + step * 2)
         image_paths = await self._retry(job_id,
             self.visual_agent.generate,
-            script=script, job_id=job_id
+            script=script, job_id=job_id, image_source=image_source
         )
         await self._log(job_id, AgentStage.VISUAL, f"[{idx+1}] {len(image_paths)} images ready")
 
@@ -199,7 +201,7 @@ class PipelineOrchestrator:
                 video.s3_url       = s3_url
                 video.file_size_mb = result["file_size_mb"]
                 video.duration_sec = result["duration_sec"]
-                video.image_source = "pexels" if settings.has_pexels else "dalle"
+                video.image_source = image_source
                 video.status       = JobStatus.COMPLETED
                 video.completed_at = datetime.utcnow()
                 await db.commit()

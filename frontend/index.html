@@ -493,7 +493,7 @@ body::before{
 .api-note a:hover{text-decoration:underline;}
 
 /* Image source selector */
-.src-options{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px;}
+.src-options{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px;}
 .src-opt{
   background:var(--bg0);
   border:1px solid var(--border3);
@@ -1219,7 +1219,7 @@ body::before{
               </div>
               <div>
                 <label class="field-label">Target duration: <span id="durVal" style="color:var(--red)">30s</span></label>
-                <input type="range" min="15" max="60" value="30" step="5" id="durSlider" style="width:100%;height:4px;appearance:none;background:var(--bg3);border-radius:2px;outline:none;margin-top:8px;cursor:pointer" oninput="document.getElementById('durVal').textContent=this.value+'s';updateCostEst()"/>
+                <input type="range" min="15" max="60" value="30" step="5" id="durSlider" style="width:100%;height:4px;appearance:none;background:var(--bg3);border-radius:2px;outline:none;margin-top:8px;cursor:pointer" oninput="document.getElementById('durVal').textContent=this.value+'s';updateCostEst();const sd=document.getElementById('sumDur');if(sd)sd.textContent=this.value+'s';" />
               </div>
             </div>
             <div>
@@ -1269,7 +1269,12 @@ body::before{
               </div>
             </div>
             <div class="src-options" id="srcOptions">
-              <div class="src-opt on" onclick="pickSrc('pexels',this)" id="src-pexels">
+              <div class="src-opt on" onclick="pickSrc('pollinations',this)" id="src-pollinations">
+                <div class="src-opt-icon">🤖</div>
+                <div class="src-opt-name">Pollinations AI</div>
+                <div class="src-opt-desc">AI images — free</div>
+              </div>
+              <div class="src-opt" onclick="pickSrc('pexels',this)" id="src-pexels">
                 <div class="src-opt-icon">📷</div>
                 <div class="src-opt-name">Pexels</div>
                 <div class="src-opt-desc">Real photos — free</div>
@@ -1277,7 +1282,7 @@ body::before{
               <div class="src-opt" onclick="pickSrc('dalle',this)" id="src-dalle">
                 <div class="src-opt-icon">🎨</div>
                 <div class="src-opt-name">DALL·E 3</div>
-                <div class="src-opt-desc">AI-generated art</div>
+                <div class="src-opt-desc">Needs OpenAI key</div>
               </div>
               <div class="src-opt" onclick="pickSrc('mixed',this)" id="src-mixed">
                 <div class="src-opt-icon">🔀</div>
@@ -1286,8 +1291,7 @@ body::before{
               </div>
             </div>
             <div class="api-note" id="srcNote">
-              📷 <strong>Pexels</strong> uses real photos matching your niche — "Ford Mustang" gives you actual Mustang photos. 
-              Free API key at <a href="https://www.pexels.com/api/" target="_blank">pexels.com/api</a>
+              🤖 <strong>Pollinations AI</strong> — imagens geradas por IA, 100% grátis, sem chave necessária. Seleciona outra opção acima para mudar.
             </div>
           </div>
 
@@ -1318,8 +1322,13 @@ body::before{
             <svg viewBox="0 0 16 16" fill="currentColor" style="width:16px;height:16px"><path d="M3 2l11 6-11 6V2z"/></svg>
             Generate Videos
           </button>
-          <p style="text-align:center;font-size:11px;color:var(--text2);margin-top:12px;font-family:var(--ff-mono)">
-            Videos are saved locally · Download as MP4 · Post anywhere
+          <div id="selectionSummary" style="background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r-sm);padding:10px 14px;margin-top:10px;font-family:var(--ff-mono);font-size:11px;color:var(--text1);display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
+            <span>🤖 <span id="sumImg">Pollinations AI</span></span>
+            <span>🎙 <span id="sumVoice">James (Male UK)</span></span>
+            <span>⏱ <span id="sumDur">30s</span></span>
+          </div>
+          <p style="text-align:center;font-size:11px;color:var(--text2);margin-top:10px;font-family:var(--ff-mono)">
+            Videos saved locally · Download as MP4 · Post anywhere
           </p>
         </div>
       </div>
@@ -1747,7 +1756,7 @@ const API = (window.location.hostname === 'localhost' && window.location.port !=
 const S = {
   niche: '',
   nicheId: null,
-  imgSrc: 'pexels',
+  imgSrc: 'pollinations',
   tone: 'energetic',
   platform: 'tiktok',
   subStyle: 'classic',
@@ -1822,14 +1831,18 @@ function updateNicheDisplay() {
 
 function pickSrc(src, el) {
   S.imgSrc = src;
-  document.querySelectorAll('.src-opt').forEach(o => o.classList.remove('on'));
+  document.querySelectorAll('#srcOptions .src-opt').forEach(o => o.classList.remove('on'));
   el.classList.add('on');
   const notes = {
-    pexels: '📷 <strong>Pexels</strong> searches for real photos matching your niche. "Ford Mustang" gives actual Mustang photos. Free key at <a href="https://www.pexels.com/api/" target="_blank">pexels.com/api</a>',
-    dalle: '🎨 <strong>DALL·E 3</strong> generates custom images based on your script content. ~$0.04 per image. Requires OpenAI key.',
-    mixed: '🔀 <strong>Mixed</strong>: first frame from Pexels (real photo), remaining frames AI-generated. Best balance of authenticity + creativity.',
+    pollinations: '🤖 <strong>Pollinations AI</strong> — imagens AI, 100% grátis, sem chave.',
+    pexels: '📷 <strong>Pexels</strong> — fotos reais. Chave grátis em <a href="https://www.pexels.com/api/" target="_blank">pexels.com/api</a>',
+    dalle: '🎨 <strong>DALL·E 3</strong> — AI premium. Requer OPENAI_API_KEY.',
+    mixed: '🔀 <strong>Mixed</strong> — primeira Pexels, restantes Pollinations.',
   };
-  document.getElementById('srcNote').innerHTML = notes[src];
+  document.getElementById('srcNote').innerHTML = notes[src] || '';
+  const srcNames = {pollinations:'Pollinations AI', pexels:'Pexels Photos', dalle:'DALL·E 3', mixed:'Mixed'};
+  const sumImg = document.getElementById('sumImg');
+  if (sumImg) sumImg.textContent = srcNames[src] || src;
 }
 
 // ─── START GENERATION ─────────────────────────────────────
@@ -1885,6 +1898,7 @@ async function runPipeline(nicheId, nicheName, count = 3) {
         videos_count: count,
         target_duration_sec: targetDuration,
         voice_id: selectedVoiceId,
+        image_source: S.imgSrc || 'pollinations',
       });
       jobId = res.job_id;
     } catch (e) {
@@ -2763,14 +2777,20 @@ function buildVoicePicker() {
       <button class="vc-play" id="vcp-${v.id}" onclick="event.stopPropagation();previewVoice('${v.id}')" title="Preview">▶</button>
     </div>
   `).join('');
+  // Restore selection highlight after rebuild
+  const card = document.getElementById('vc-' + selectedVoiceId);
+  if (card) card.classList.add('on');
 }
 
 function selectVoice(voiceId) {
   selectedVoiceId = voiceId;
   document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('on'));
-  document.querySelectorAll('.vc-name').forEach(c => c.style.color = '');
   const card = document.getElementById('vc-' + voiceId);
   if (card) card.classList.add('on');
+  // Update summary bar
+  const v = VOICES.find(x => x.id === voiceId);
+  const sumVoice = document.getElementById('sumVoice');
+  if (sumVoice && v) sumVoice.textContent = v.name + ' (' + v.desc + ')';
 }
 
 function previewVoice(voiceId) {
@@ -2831,7 +2851,8 @@ buildAgentTrack();
 // Build voice picker
 buildVoicePicker();
 // Reload voices list when speech synthesis is ready
-if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = buildVoicePicker;
+// Preload voice list silently (no rebuild)
+if ('speechSynthesis' in window) { speechSynthesis.getVoices(); }
 
 // Wire up event listeners
 document.getElementById('videoCount')?.addEventListener('change', updateCostEst);
