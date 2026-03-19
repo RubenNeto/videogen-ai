@@ -135,6 +135,8 @@ async def delete_niche(niche_id: str, db: AsyncSession = Depends(get_db)):
 class PipelineRequest(BaseModel):
     niche_id: str
     videos_count: Optional[int] = None
+    target_duration_sec: Optional[int] = 30
+    voice_id: Optional[str] = "male-uk"  # voice selection from frontend
 
 
 @app.post("/api/pipeline/run")
@@ -180,7 +182,7 @@ async def run_pipeline(
     async def run_bg():
         orch = PipelineOrchestrator()
         try:
-            await orch.run(niche.id, niche.name, data.videos_count, job_id=job_id)
+            await orch.run(niche.id, niche.name, data.videos_count, job_id=job_id, target_duration_sec=data.target_duration_sec, voice_id=data.voice_id)
         except Exception as e:
             logger.error(f"Background pipeline failed [{job_id}]: {e}")
             # Marcar job como falhado na DB

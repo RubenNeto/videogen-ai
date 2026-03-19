@@ -969,6 +969,35 @@ body::before{
   .sidebar{display:none;}
   .page{padding:16px;}
 }
+
+/* ── VOICE PICKER ─────────────────────────────────── */
+.voice-card{
+  background:var(--bg2);border:1px solid var(--border3);
+  border-radius:var(--r-sm);padding:10px 12px;
+  cursor:pointer;transition:all .15s;
+  display:flex;align-items:center;gap:10px;
+}
+.voice-card:hover{border-color:var(--border3);background:var(--bg3);}
+.voice-card.on{border-color:rgba(255,59,92,.5);background:var(--red-dim);}
+.voice-card.on .vc-name{color:var(--red);}
+.vc-avatar{
+  width:36px;height:36px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;flex-shrink:0;
+}
+.vc-info{flex:1;min-width:0;}
+.vc-name{font-size:12px;font-weight:600;color:var(--text0);}
+.vc-desc{font-size:10px;color:var(--text2);margin-top:1px;}
+.vc-play{
+  width:28px;height:28px;border-radius:50%;
+  background:transparent;border:1px solid var(--border3);
+  color:var(--text1);font-size:11px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;transition:all .15s;
+}
+.vc-play:hover{background:var(--red);border-color:var(--red);color:#fff;}
+.vc-play.playing{background:var(--red);border-color:var(--red);color:#fff;}
+
 </style>
 </head>
 <body>
@@ -1262,23 +1291,18 @@ body::before{
             </div>
           </div>
 
-          <!-- Step 4: Voice -->
+          <!-- Step 4: Voice picker -->
           <div class="setup-step" id="step4">
             <div class="step-header">
               <div class="step-num" id="snum4">4</div>
               <div>
-                <div class="step-title">Voiceover</div>
-                <div class="step-desc">Select voice engine</div>
+                <div class="step-title">Voice</div>
+                <div class="step-desc">Choose a voice — click ▶ to preview</div>
               </div>
             </div>
-            <label class="field-label">Voice Engine</label>
-            <select class="field-input field-select" id="voiceSelect">
-              <option value="gtts">gTTS — Free (Google, no API key needed)</option>
-              <option value="elevenlabs">ElevenLabs — Natural US voice (API key required)</option>
-            </select>
-            <div class="api-note" style="margin-top:10px">
-              💡 gTTS works immediately with zero configuration. 
-              Upgrade to <a href="https://elevenlabs.io" target="_blank">ElevenLabs</a> for a more natural voice — add your key to <strong>.env</strong>
+            <div id="voicePickerGrid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px"></div>
+            <div class="api-note">
+              💡 All voices use gTTS (free). For higher quality add <a href="https://elevenlabs.io" target="_blank">ElevenLabs</a> key to <strong>.env</strong>
             </div>
           </div>
 
@@ -1854,7 +1878,14 @@ async function runPipeline(nicheId, nicheName, count = 3) {
     // Kick off pipeline
     let jobId;
     try {
-      const res = await api('POST', '/api/pipeline/run', { niche_id: nicheId, videos_count: count });
+      const durSlider = document.getElementById('durSlider');
+      const targetDuration = durSlider ? parseInt(durSlider.value) : 30;
+      const res = await api('POST', '/api/pipeline/run', {
+        niche_id: nicheId,
+        videos_count: count,
+        target_duration_sec: targetDuration,
+        voice_id: selectedVoiceId,
+      });
       jobId = res.job_id;
     } catch (e) {
       // Demo mode — simulate
@@ -2706,6 +2737,84 @@ document.addEventListener('keydown', e => {
 });
 
 
+// ─── VOICE PICKER ───────────────────────────────────────────────────
+const VOICES = [
+  { id:'male-uk',    name:'James',   desc:'Male · UK English',  emoji:'👨', tld:'co.uk', gender:'male'   },
+  { id:'male-us',    name:'Mike',    desc:'Male · US English',  emoji:'🧔', tld:'us',    gender:'male'   },
+  { id:'male-au',    name:'Liam',    desc:'Male · Australian',  emoji:'🤠', tld:'com.au',gender:'male'   },
+  { id:'female-us',  name:'Sarah',   desc:'Female · US English',emoji:'👩', tld:'us',    gender:'female' },
+  { id:'female-uk',  name:'Emma',    desc:'Female · UK English',emoji:'💁‍♀️',tld:'co.uk', gender:'female' },
+  { id:'female-in',  name:'Priya',   desc:'Female · Indian',    emoji:'👩‍💼',tld:'co.in',  gender:'female' },
+];
+
+let selectedVoiceId = 'male-uk';  // default: male UK
+let playingAudio = null;
+
+function buildVoicePicker() {
+  const grid = document.getElementById('voicePickerGrid');
+  if (!grid) return;
+  grid.innerHTML = VOICES.map(v => `
+    <div class="voice-card ${v.id === selectedVoiceId ? 'on' : ''}" id="vc-${v.id}" onclick="selectVoice('${v.id}')">
+      <div class="vc-avatar" style="background:${v.gender==='male'?'rgba(0,212,255,0.15)':'rgba(255,59,92,0.15)'}">${v.emoji}</div>
+      <div class="vc-info">
+        <div class="vc-name">${v.name}</div>
+        <div class="vc-desc">${v.desc}</div>
+      </div>
+      <button class="vc-play" id="vcp-${v.id}" onclick="event.stopPropagation();previewVoice('${v.id}')" title="Preview">▶</button>
+    </div>
+  `).join('');
+}
+
+function selectVoice(voiceId) {
+  selectedVoiceId = voiceId;
+  document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('on'));
+  document.querySelectorAll('.vc-name').forEach(c => c.style.color = '');
+  const card = document.getElementById('vc-' + voiceId);
+  if (card) card.classList.add('on');
+}
+
+function previewVoice(voiceId) {
+  const voice = VOICES.find(v => v.id === voiceId);
+  if (!voice) return;
+
+  // Stop any playing audio
+  if (playingAudio) {
+    playingAudio.pause();
+    playingAudio = null;
+    document.querySelectorAll('.vc-play').forEach(b => { b.textContent = '▶'; b.classList.remove('playing'); });
+  }
+
+  const btn = document.getElementById('vcp-' + voiceId);
+  if (!btn) return;
+
+  // Use browser speech synthesis for preview (no API needed)
+  if ('speechSynthesis' in window) {
+    const utter = new SpeechSynthesisUtterance("Hey, this is how I sound. Follow for more tips!");
+    
+    // Try to match voice gender/locale
+    const voices = speechSynthesis.getVoices();
+    const lang = voice.tld === 'co.uk' ? 'en-GB' : voice.tld === 'com.au' ? 'en-AU' : voice.tld === 'co.in' ? 'en-IN' : 'en-US';
+    const genderMatch = voices.find(v => v.lang.startsWith(lang.split('-')[0]) && v.lang.includes(lang.split('-')[1]));
+    if (genderMatch) utter.voice = genderMatch;
+    utter.lang = lang;
+    utter.rate = 1.15;  // matches our +15% speed
+    utter.pitch = voice.gender === 'male' ? 0.8 : 1.1;
+
+    btn.textContent = '⏹';
+    btn.classList.add('playing');
+
+    utter.onend = () => {
+      btn.textContent = '▶';
+      btn.classList.remove('playing');
+    };
+
+    speechSynthesis.speak(utter);
+    showToast(`🔊 Previewing ${voice.name}...`, 'info');
+  } else {
+    showToast('⚠️ Voice preview not supported in this browser', 'warn');
+  }
+}
+
 // ─── INIT ─────────────────────────────────────────────────
 
 // Restore favourites badge from localStorage
@@ -2718,6 +2827,11 @@ document.addEventListener('keydown', e => {
 
 // Build agent track on load
 buildAgentTrack();
+
+// Build voice picker
+buildVoicePicker();
+// Reload voices list when speech synthesis is ready
+if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = buildVoicePicker;
 
 // Wire up event listeners
 document.getElementById('videoCount')?.addEventListener('change', updateCostEst);

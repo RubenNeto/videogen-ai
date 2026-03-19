@@ -33,7 +33,7 @@ class PipelineOrchestrator:
         self.assembly_agent  = VideoAssemblyAgent()
         self.seo_agent       = SEOAgent()
 
-    async def run(self, niche_id: str, niche_name: str, videos_count: int = None, job_id: str = None) -> str:
+    async def run(self, niche_id: str, niche_name: str, videos_count: int = None, job_id: str = None, target_duration_sec: int = 30, voice_id: str = 'male-uk') -> str:
         """Entry point. Recebe job_id ja criado pela API."""
         if not job_id:
             job_id = str(uuid.uuid4())
@@ -75,7 +75,9 @@ class PipelineOrchestrator:
                 try:
                     vid_id = await self._produce_video(
                         job_id, niche_id, niche_name,
-                        strategy, idx, count, base_pct, per_video_pct
+                        strategy, idx, count, base_pct, per_video_pct,
+                        target_duration_sec=target_duration_sec,
+                        voice_id=voice_id
                     )
                     video_ids.append(vid_id)
                 except Exception as e:
@@ -108,7 +110,9 @@ class PipelineOrchestrator:
 
     async def _produce_video(
         self, job_id, niche_id, niche_name,
-        strategy, idx, total, base_pct, pct_budget
+        strategy, idx, total, base_pct, pct_budget,
+        target_duration_sec: int = 30,
+        voice_id: str = 'male-uk'
     ) -> str:
         video_id = str(uuid.uuid4())
         logger.info(f"[{job_id}] Video {idx+1}/{total}: {strategy.get('topic','?')}")
@@ -125,9 +129,11 @@ class PipelineOrchestrator:
 
         # Script
         await self._set_stage(job_id, AgentStage.SCRIPT, base_pct + step)
+        # Inject target duration into strategy for script agent
+        strategy_with_dur = {**strategy, "target_duration_sec": target_duration_sec}
         script = await self._retry(job_id,
             self.script_agent.generate,
-            strategy=strategy, job_id=job_id
+            strategy=strategy_with_dur, job_id=job_id
         )
         await self._log(job_id, AgentStage.SCRIPT,
                         f"[{idx+1}] Hook: \"{script.get('hook', {}).get('text', '')[:50]}\"")
@@ -144,17 +150,19 @@ class PipelineOrchestrator:
         await self._set_stage(job_id, AgentStage.VOICEOVER, base_pct + step * 3)
         audio_path = await self._retry(job_id,
             self.voiceover_agent.generate,
-            script=script, job_id=job_id
+            script=script, job_id=job_id, voice_id=voice_id
         )
         await self._log(job_id, AgentStage.VOICEOVER, f"[{idx+1}] Audio ready")
 
         # Assembly
         await self._set_stage(job_id, AgentStage.ASSEMBLY, base_pct + step * 4)
+        # Pass target duration to assembly for audio trimming
+        script_with_dur = {**script, "target_duration_sec": target_duration_sec}
         result = await self._retry(job_id,
             self.assembly_agent.assemble,
             image_paths=image_paths,
             audio_path=audio_path,
-            script=script,
+            script=script_with_dur,
             job_id=job_id
         )
         await self._log(job_id, AgentStage.ASSEMBLY,

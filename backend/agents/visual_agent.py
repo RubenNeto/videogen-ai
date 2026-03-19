@@ -1,7 +1,7 @@
 """
 Agent 4: Visual Agent
 Usa Pollinations.ai — 100% grátis, sem API key, imagens AI geradas.
-Fallback: cor sólida via FFmpeg.
+Aumentado timeout para 90s (Pollinations pode ser lento).
 """
 import asyncio
 import logging
@@ -13,16 +13,13 @@ from backend.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Pollinations.ai — API pública gratuita, sem registo
-POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{prompt}"
-
 
 class VisualAgent:
 
-    STYLE_SUFFIX = (
-        "cinematic, vertical 9:16 portrait, "
-        "sharp focus, professional photography, "
-        "vivid colors, no text, no watermark"
+    STYLE = (
+        "cinematic dramatic lighting, vertical portrait 9:16, "
+        "ultra sharp, professional quality, vivid colors, "
+        "no text, no watermark, no logo"
     )
 
     async def generate(self, script: dict, job_id: str = "") -> list[str]:
@@ -31,7 +28,7 @@ class VisualAgent:
 
         if not image_prompts:
             image_prompts = [
-                {"prompt": seg.get("visual_note", niche), "search_query": niche}
+                {"prompt": seg.get("visual_note", niche)}
                 for seg in script.get("body", [{"visual_note": niche}])
             ]
 
@@ -39,16 +36,12 @@ class VisualAgent:
 
         results = []
         for idx, ip in enumerate(image_prompts):
-            try:
-                r = await self._get_image(ip, idx, job_id)
-                results.append(r)
-            except Exception as e:
-                logger.warning(f"[{job_id}] img_{idx} failed: {e}")
-                results.append(e)
+            path = await self._get_image(ip, idx, job_id)
+            results.append(path)
 
-        valid = [r for r in results if isinstance(r, str) and os.path.exists(r)]
+        valid = [r for r in results if r and os.path.exists(r)]
         if not valid:
-            raise RuntimeError(f"[{job_id}] All image generation attempts failed")
+            raise RuntimeError(f"[{job_id}] All image generation failed")
 
         logger.info(f"[{job_id}] Got {len(valid)}/{len(image_prompts)} images")
         return valid
@@ -58,52 +51,50 @@ class VisualAgent:
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"img_{idx:02d}_{uuid.uuid4().hex[:6]}.jpg")
 
-        ai_prompt = image_prompt.get("prompt", image_prompt.get("search_query", "abstract"))
+        prompt = image_prompt.get("prompt", "abstract cinematic scene")
 
-        # 1. Pollinations.ai (grátis, sem key)
-        try:
-            path = await self._pollinations(ai_prompt, out_path, idx)
-            logger.info(f"[{job_id}] img_{idx}: Pollinations ✓")
-            return path
-        except Exception as e:
-            logger.warning(f"[{job_id}] img_{idx}: Pollinations failed: {e}")
+        # Try Pollinations with retry
+        for attempt in range(3):
+            try:
+                path = await self._pollinations(prompt, out_path, seed=idx + attempt * 10)
+                logger.info(f"[{job_id}] img_{idx}: Pollinations ✓")
+                return path
+            except Exception as e:
+                logger.warning(f"[{job_id}] img_{idx} attempt {attempt+1}: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(3)
 
-        # 2. DALL·E (se tiver OpenAI key)
+        # DALL·E fallback
         if settings.OPENAI_API_KEY:
             try:
-                path = await self._dalle(ai_prompt, out_path.replace(".jpg", ".png"))
+                path = await self._dalle(prompt, out_path.replace(".jpg", ".png"))
                 logger.info(f"[{job_id}] img_{idx}: DALL·E ✓")
                 return path
             except Exception as e:
                 logger.warning(f"[{job_id}] img_{idx}: DALL·E failed: {e}")
 
-        # 3. Último recurso — cor sólida
+        # Color fallback — never leave video imageless
+        logger.warning(f"[{job_id}] img_{idx}: using color fallback")
         return await self._color_fallback(out_path, idx)
 
-    async def _pollinations(self, prompt: str, out_path: str, seed: int) -> str:
-        """
-        Pollinations.ai — API gratuita, sem registo, sem limites.
-        https://pollinations.ai
-        """
-        full_prompt = f"{prompt}, {self.STYLE_SUFFIX}"
-        encoded = urllib.parse.quote(full_prompt)
-
+    async def _pollinations(self, prompt: str, out_path: str, seed: int = 0) -> str:
+        full = f"{prompt}, {self.STYLE}"
+        encoded = urllib.parse.quote(full)
         url = (
             f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?width=1080&height=1920"
-            f"&seed={seed}"
-            f"&nologo=true"
-            f"&enhance=true"
+            f"?width=1080&height=1920&seed={seed}&nologo=true&enhance=true&model=flux"
         )
 
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
+        # 90s timeout — Pollinations can be slow
+        async with httpx.AsyncClient(timeout=90, follow_redirects=True) as http:
             resp = await http.get(url)
             resp.raise_for_status()
 
-            # Verificar que é mesmo uma imagem
-            ct = resp.headers.get("content-type", "")
-            if "image" not in ct and len(resp.content) < 1000:
-                raise RuntimeError(f"Not an image response: {ct}")
+            content_type = resp.headers.get("content-type", "")
+            if "image" not in content_type:
+                raise RuntimeError(f"Not an image: {content_type[:50]}")
+            if len(resp.content) < 5000:
+                raise RuntimeError(f"Image too small ({len(resp.content)} bytes)")
 
             with open(out_path, "wb") as f:
                 f.write(resp.content)
@@ -112,36 +103,27 @@ class VisualAgent:
 
     async def _dalle(self, prompt: str, out_path: str) -> str:
         from openai import AsyncOpenAI
-        import httpx as _httpx
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         resp = await client.images.generate(
             model="dall-e-3",
-            prompt=f"{prompt}. {self.STYLE_SUFFIX}"[:4000],
+            prompt=f"{prompt}. {self.STYLE}"[:4000],
             size="1024x1792",
-            quality="standard",
-            n=1,
+            quality="standard", n=1,
         )
-        img_url = resp.data[0].url
-        async with _httpx.AsyncClient(timeout=30) as http:
-            img_resp = await http.get(img_url)
+        async with httpx.AsyncClient(timeout=30) as http:
+            r = await http.get(resp.data[0].url)
             with open(out_path, "wb") as f:
-                f.write(img_resp.content)
+                f.write(r.content)
         return out_path
 
     async def _color_fallback(self, out_path: str, idx: int) -> str:
-        colors = ["#1a1a2e", "#16213e", "#0f3460", "#533483", "#2d132c"]
-        color = colors[idx % len(colors)]
-        png_path = out_path.replace(".jpg", ".png")
-        cmd = [
-            "ffmpeg", "-y", "-f", "lavfi",
-            "-i", f"color=c={color}:size=1080x1920:rate=1",
-            "-frames:v", "1", png_path,
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        colors = ["0f0c29", "302b63", "24243e", "0f2027", "1a1a2e"]
+        c = colors[idx % len(colors)]
+        png = out_path.replace(".jpg", ".png")
+        cmd = ["ffmpeg", "-y", "-f", "lavfi",
+               "-i", f"color=c=#{c}:size=1080x1920:rate=1",
+               "-frames:v", "1", png]
+        proc = await asyncio.create_subprocess_exec(*cmd,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await proc.communicate()
-        logger.warning(f"Using color fallback for image {idx}")
-        return png_path
+        return png
