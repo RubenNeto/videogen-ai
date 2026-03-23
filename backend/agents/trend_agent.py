@@ -1,47 +1,62 @@
 """
-Agent 1: Trend Analysis — funciona com Groq, Gemini ou OpenAI.
+Agent 1: Trend & Ideas — Creashort style
+Gera 3 ideias virais com hook psicológico forte + análise de padrões.
 """
 import json, logging
 from backend.utils.ai_client import chat_completion
 logger = logging.getLogger(__name__)
 
 class TrendAnalysisAgent:
-    SYSTEM = """You are a TikTok viral content analyst. Analyze the given niche and return
-data-driven insights about what content performs best for US English audiences.
-Focus on: emotional triggers, hook patterns, high-retention formats.
+    SYSTEM = """You are a viral short-form video strategist who has studied every viral video
+on TikTok, Reels and Shorts. You know exactly what makes people stop scrolling.
+
+You understand:
+- Pattern interrupts that stop the scroll in frame 1
+- Curiosity gaps that force watch completion
+- Emotional triggers (fear, greed, envy, awe, shock)
+- The "forbidden knowledge" format that gets 10x shares
+- Why faceless videos outperform face-reveal in certain niches
+
 Respond ONLY in valid JSON."""
 
     async def analyze(self, niche: str, job_id: str = "") -> dict:
-        logger.info(f"[{job_id}] Analyzing trends for: {niche}")
+        logger.info(f"[{job_id}] Trend analysis: {niche}")
         prompt = f"""
 Niche: "{niche}"
 
-Return JSON with this EXACT structure:
+Generate 3 viral video ideas for this niche. Think like Creashort.ai — scroll-stopping, 
+high retention, faceless format.
+
+Return this EXACT JSON:
 {{
   "niche": "{niche}",
   "topics": [
     {{
-      "title": "specific video topic",
-      "why_viral": "psychological reason",
-      "emotion": "curiosity|fear|inspiration|humor|shock|relatability",
-      "format": "storytime|tutorial|listicle|myth_busting|POV|challenge|reaction",
-      "hook_idea": "exact words for first 3 seconds",
-      "potential": "high|very_high"
+      "title": "specific punchy video title",
+      "hook": "exact scroll-stopping first sentence (max 10 words, creates FOMO or shock)",
+      "hook_type": "shocking_stat|forbidden_knowledge|contrarian|fear|curiosity_gap|transformation",
+      "why_viral": "psychological reason this spreads",
+      "emotion": "fear|greed|awe|anger|envy|inspiration",
+      "retention_trick": "specific technique to keep viewers watching",
+      "visual_style": "dark_cinematic|bright_energetic|minimalist|dramatic|educational",
+      "score": 9
     }}
   ],
   "hashtags": {{
-    "broad": ["#tag1", "#tag2"],
-    "niche": ["#tag3", "#tag4"],
-    "trending": ["#fyp", "#foryoupage", "#viral"]
+    "niche": ["#tag1", "#tag2", "#tag3"],
+    "broad": ["#fyp", "#foryou", "#viral"]
   }},
-  "hook_templates": ["Template 1", "Template 2", "Template 3"],
-  "avoid": ["thing to avoid 1", "thing to avoid 2"],
-  "optimal_length": "20-35 seconds"
+  "best_posting_time": "describe optimal posting window",
+  "hook_templates": [
+    "Nobody tells you this about [TOPIC]...",
+    "I tested [TOPIC] for 30 days. The result?",
+    "This [TOPIC] secret changed everything."
+  ]
 }}
 
-Generate exactly 5 topics. All content in ENGLISH for US audience.
+Make all 3 ideas genuinely different formats. All in ENGLISH. Be specific, not generic.
 """
-        raw = await chat_completion(self.SYSTEM, prompt, json_mode=True, temperature=0.7)
+        raw = await chat_completion(self.SYSTEM, prompt, json_mode=True, temperature=0.85)
         result = json.loads(raw)
-        logger.info(f"[{job_id}] Topics: {[t['title'] for t in result.get('topics', [])]}")
+        logger.info(f"[{job_id}] Ideas: {[t['title'] for t in result.get('topics', [])]}")
         return result
