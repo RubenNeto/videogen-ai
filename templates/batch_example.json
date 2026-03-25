@@ -1,0 +1,32 @@
+[
+  {
+    "theme": "curiosidades",
+    "duration": 30,
+    "voice_type": "pt_female",
+    "language": "pt",
+    "subtitle_style": "tiktok",
+    "topic": "curiosidades sobre o oceano profundo",
+    "add_music": true,
+    "music_volume": 0.15
+  },
+  {
+    "theme": "motivacao",
+    "duration": 15,
+    "voice_type": "pt_male",
+    "language": "pt",
+    "subtitle_style": "neon",
+    "topic": null,
+    "add_music": true,
+    "music_volume": 0.20
+  },
+  {
+    "theme": "factos",
+    "duration": 60,
+    "voice_type": "en_female",
+    "language": "en",
+    "subtitle_style": "tiktok",
+    "topic": "mind-blowing science facts",
+    "add_music": true,
+    "music_volume": 0.12
+  }
+]

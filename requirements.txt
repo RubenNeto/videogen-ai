@@ -1,0 +1,50 @@
+# ═══════════════════════════════════════════════════════
+# TikTok Video Generator - Dependências Python
+# Instalar: pip install -r requirements.txt
+# ═══════════════════════════════════════════════════════
+
+# ─── Interface Web ──────────────────────────────────────
+gradio>=4.20.0
+
+# ─── Processamento de Imagens ───────────────────────────
+Pillow>=10.0.0
+
+# ─── TTS - Voz (Instala pelo menos 1) ───────────────────
+# Opção 1: edge-tts (RECOMENDADO - gratuito, sem instalação extra)
+edge-tts>=6.1.9
+
+# Opção 2: gTTS (Google TTS, simples)
+gTTS>=2.5.0
+
+# Opção 3: Coqui TTS (local, mais pesado)
+# TTS>=0.22.0  # Descomenta para usar
+
+# ─── HTTP / API ─────────────────────────────────────────
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# ─── Whisper para legendas precisas (opcional) ──────────
+# openai-whisper>=20231117  # Descomenta se quiseres
+# faster-whisper>=0.10.0    # Alternativa mais rápida
+
+# ─── Utilitários ────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ─── Instalação de Sistema Necessária ───────────────────
+# FFmpeg: https://ffmpeg.org/download.html
+# Ubuntu/Debian: sudo apt install ffmpeg
+# Windows: winget install ffmpeg
+# macOS: brew install ffmpeg
+
+# ─── LLM Local (opcional) ───────────────────────────────
+# Ollama: https://ollama.ai (instala separadamente)
+# Após instalar: ollama pull llama3
+
+# ─── Notas ──────────────────────────────────────────────
+# Para Stable Diffusion local:
+#   AUTOMATIC1111: https://github.com/AUTOMATIC1111/stable-diffusion-webui
+#   Corre com flag: --api --listen
+#
+# Para Piper TTS (offline, rápido):
+#   pip install piper-tts
+#   Descarrega modelos em: https://huggingface.co/rhasspy/piper-voices

@@ -1,142 +1,268 @@
-# 🎬 VideoGen AI
+# 🎬 TikTok Video Generator
 
-Gera vídeos TikTok/Reels automaticamente com IA. Entra o niche, faz download do MP4.
+> **Gerador automático de vídeos TikTok com IA · 100% gratuito · Open Source**
 
-**Stack:** FastAPI + SQLite + FFmpeg · Deploy no Railway com 1 clique
-
----
-
-## Chaves necessárias (todas gratuitas)
-
-| Serviço | Para quê | Custo | Link |
-|---------|----------|-------|------|
-| **Groq** | Scripts + IA (Llama 3.3-70B) | **Grátis** | [console.groq.com](https://console.groq.com) |
-| **Pexels** | Fotos reais por niche | **Grátis** | [pexels.com/api](https://www.pexels.com/api/) |
-| gTTS | Voz (automático) | **Grátis** | Sem chave |
-
-> **Mínimo para funcionar: só a chave Groq** (30 segundos, sem cartão de crédito).
+Cria vídeos curtos para TikTok automaticamente usando uma arquitetura de múltiplos agentes de IA, sem qualquer custo obrigatório.
 
 ---
 
-## Deploy no Railway
+## ✨ Funcionalidades
 
-### Passo 1 — Obtém as chaves grátis
-
-**Groq** (30 segundos):
-1. Vai a [console.groq.com](https://console.groq.com)
-2. Sign up com Google/GitHub
-3. API Keys → Create API Key
-4. Copia `gsk_...`
-
-**Pexels** (recomendado, também grátis):
-1. Vai a [pexels.com/api](https://www.pexels.com/api/)
-2. Regista → "Your API Key"
+| Funcionalidade | Detalhes |
+|---|---|
+| 🎯 Temas | Motivação, Curiosidades, Histórias, Factos, Tecnologia, Natureza, História, Saúde |
+| ⏱️ Durações | 15s, 30s, 60s |
+| 🎤 Vozes | PT/EN/ES/FR · Masculina/Feminina/Robótica |
+| 🎨 Imagens | Pollinations.ai (zero config) · Stable Diffusion · HuggingFace |
+| 💬 Legendas | Estilo TikTok, Neon, Clássico, Minimal |
+| 🎵 Música | Música de fundo livre de direitos |
+| 📦 Batch | Geração de múltiplos vídeos em lote |
+| 📱 Formato | 1080×1920 (9:16 vertical) |
 
 ---
 
-### Passo 2 — GitHub
+## 🏗️ Arquitetura Multi-Agente
 
+```
+┌─────────────────────────────────────────────────────────┐
+│                   PIPELINE PRINCIPAL                     │
+│                                                          │
+│  [Input] → A1 → A2 → A3 → A4 → A5 → A6 → [Vídeo MP4] │
+└─────────────────────────────────────────────────────────┘
+
+A1: ScriptAgent    → LLM (Ollama/Groq) → Script viral estruturado
+A2: SceneAgent     → Divide em cenas com timing e efeitos
+A3: ImageAgent     → Pollinations/SD/HF → Imagem por cena
+A4: VoiceAgent     → edge-tts/Piper/Coqui → Áudio MP3
+A5: SubtitleAgent  → Whisper/Auto → Ficheiro .ASS animado
+A6: VideoAssembler → FFmpeg → Vídeo 1080x1920 final
+```
+
+---
+
+## 🚀 Instalação Rápida
+
+### 1. Clona o repositório
 ```bash
-# Extrai o zip e entra na pasta
-cd videogen-railway
-
-git init
-git add .
-git commit -m "VideoGen AI initial commit"
-
-# Vai a github.com → New repository → cria "videogen-ai"
-git remote add origin https://github.com/SEU-USERNAME/videogen-ai.git
-git branch -M main
-git push -u origin main
+git clone https://github.com/teu-user/tiktok-video-generator
+cd tiktok-video-generator
 ```
 
----
-
-### Passo 3 — Railway
-
-1. Vai a [railway.app](https://railway.app) → **New Project**
-2. **Deploy from GitHub repo** → seleciona `videogen-ai`
-3. Railway deteta o `Dockerfile` → clica **Deploy Now**
-4. Enquanto faz build, vai a **Variables** → Add Variable:
-
-```
-GROQ_API_KEY        = gsk_...
-PEXELS_API_KEY      = (opcional mas recomendado)
-VIDEO_QUALITY       = medium
-VIDEOS_PER_RUN      = 3
-```
-
-5. Railway faz redeploy automático
-6. Vai a **Settings** → **Networking** → **Generate Domain**
-7. Abre o URL → app online! 🎉
-
----
-
-## Testar localmente com Docker
-
+### 2. Instala dependências Python
 ```bash
-# 1. Cria o .env com as tuas chaves
+pip install -r requirements.txt
+```
+
+### 3. Instala FFmpeg
+
+**Linux/Ubuntu:**
+```bash
+sudo apt update && sudo apt install ffmpeg
+```
+
+**macOS:**
+```bash
+brew install ffmpeg
+```
+
+**Windows:**
+```
+winget install ffmpeg
+# ou descarrega em: https://ffmpeg.org/download.html
+```
+
+### 4. Configura LLM (escolhe 1)
+
+**Opção A — Ollama (recomendado, 100% local):**
+```bash
+# Instala Ollama em: https://ollama.ai
+ollama pull llama3
+ollama serve
+```
+
+**Opção B — Groq (gratuito, sem instalação):**
+```bash
+# Cria conta em: https://console.groq.com
+export GROQ_API_KEY="gsk_..."
+```
+
+### 5. Copia configuração
+```bash
 cp .env.example .env
-# Edita .env: adiciona GROQ_API_KEY=gsk_...
-
-# 2. Build e arrancar
-docker-compose up --build
-
-# 3. Abre http://localhost:8080
+# Edita .env com as tuas configurações
 ```
 
-Sem Docker:
+### 6. Inicia a aplicação
+
+**Interface Web (recomendado):**
 ```bash
-pip install -r backend/requirements.txt
-# Mac: brew install ffmpeg   |   Linux: apt install ffmpeg
-cp .env.example .env && nano .env
-uvicorn backend.main:app --host 0.0.0.0 --port 8080
-# Abre http://localhost:8080
+python app.py
+# Abre: http://localhost:7860
+```
+
+**Linha de comandos:**
+```bash
+python cli.py --theme curiosidades --duration 30
 ```
 
 ---
 
-## Como funciona
+## 📖 Uso
 
+### Interface Web
+1. Abre `http://localhost:7860`
+2. Escolhe o tema, duração, voz e idioma
+3. Clica em **"🚀 GERAR VÍDEO"**
+4. Aguarda ~2-5 minutos
+5. Descarrega o vídeo gerado!
+
+### CLI
+```bash
+# Vídeo simples
+python cli.py --theme motivacao --duration 30
+
+# Com tópico específico
+python cli.py --theme factos --duration 60 --topic "factos sobre o universo"
+
+# Em inglês com voz masculina
+python cli.py --theme curiosidades --duration 30 --language en --voice en_male
+
+# Sem música
+python cli.py --theme historias --duration 60 --no-music
+
+# Batch (múltiplos vídeos)
+python cli.py --batch templates/batch_example.json
 ```
-Tu: entras "Ford Mustang"
-         ↓
-┌──────────────────────────────────┐
-│  7 Agentes IA (Groq Llama 3.3)  │
-│                                  │
-│  1. Analisa tendências TikTok    │
-│  2. Estratégia de conteúdo       │
-│  3. Escreve script com hook      │
-│  4. Busca fotos reais (Pexels)   │
-│  5. Gera voz (gTTS gratuito)     │
-│  6. Monta vídeo 9:16 (FFmpeg)    │
-│  7. Caption + hashtags           │
-└───────────────┬──────────────────┘
-                ↓
-     MP4 pronto para download
-  TikTok · Reels · Shorts · Feed
+
+### Python API
+```python
+from pipeline import VideoGenerationPipeline
+
+pipe = VideoGenerationPipeline()
+
+result = pipe.generate_video(
+    theme="curiosidades",
+    duration=30,
+    voice_type="pt_female",
+    language="pt",
+    subtitle_style="tiktok",
+    topic="factos sobre o oceano profundo",
+    add_music=True
+)
+
+if result["success"]:
+    print(f"✅ Vídeo: {result['video_path']}")
+    print(f"📊 Duração: {result['duration_real']:.1f}s")
+    print(f"💾 Tamanho: {result['size_mb']:.1f} MB")
 ```
 
 ---
 
-## Variáveis de ambiente
+## 🗂️ Estrutura do Projeto
 
-| Variável | Obrigatória | Descrição |
-|----------|-------------|-----------|
-| `GROQ_API_KEY` | ✅ | Chave Groq grátis (ou usa GEMINI/OPENAI) |
-| `GEMINI_API_KEY` | alternativa | Google Gemini grátis |
-| `OPENAI_API_KEY` | alternativa paga | OpenAI GPT-4o-mini |
-| `PEXELS_API_KEY` | recomendado | Fotos reais grátis |
-| `ELEVENLABS_API_KEY` | opcional | Voz mais natural |
-| `VIDEO_QUALITY` | não | `low` / `medium` / `high` (default: medium) |
-| `VIDEOS_PER_RUN` | não | Nº vídeos por run (default: 3) |
+```
+tiktok_generator/
+├── app.py                  # Interface web Gradio
+├── cli.py                  # Interface CLI
+├── pipeline.py             # Orquestrador principal
+├── requirements.txt        # Dependências Python
+├── .env.example            # Configurações de ambiente
+│
+├── config/
+│   └── settings.py         # Todas as configurações
+│
+├── agents/
+│   ├── agent1_script.py    # Geração de script (LLM)
+│   ├── agent2_scenes.py    # Divisão em cenas
+│   ├── agent3_images.py    # Geração de imagens (IA)
+│   ├── agent4_voice.py     # Geração de voz (TTS)
+│   ├── agent5_subtitles.py # Legendas sincronizadas
+│   └── agent6_video.py     # Montagem com FFmpeg
+│
+├── queue/
+│   └── video_queue.py      # Sistema de fila
+│
+├── assets/
+│   ├── music/              # Músicas de fundo (.mp3)
+│   └── fonts/              # Fontes personalizadas
+│
+├── templates/
+│   └── batch_example.json  # Exemplo de batch
+│
+└── output/
+    ├── videos/             # Vídeos gerados
+    ├── images/             # Imagens geradas (cache)
+    ├── audio/              # Áudios gerados (cache)
+    └── logs/               # Logs por job
+```
 
 ---
 
-## Formato dos vídeos gerados
+## 🎵 Adicionar Música de Fundo
 
-- **Resolução:** 1080×1920 (9:16 vertical)
-- **Codec:** H.264 + AAC
-- **Legendas:** gravadas no vídeo
-- **Duração:** 20–35 segundos
-- **Compatível:** TikTok · Instagram Reels · YouTube Shorts · Facebook Reels
+Coloca ficheiros `.mp3` na pasta `assets/music/`:
+
+```bash
+# Descarrega músicas livres de direitos:
+# https://pixabay.com/music/
+# https://freemusicarchive.org/
+# https://www.bensound.com/
+
+# Exemplo:
+assets/music/
+├── upbeat_motivational.mp3
+├── ambient_curiosity.mp3
+└── epic_cinematic.mp3
+```
+
+---
+
+## 🌐 Backends Gratuitos
+
+### LLM (Script)
+| Backend | Qualidade | Velocidade | Requer |
+|---|---|---|---|
+| Ollama + Llama3 | ⭐⭐⭐⭐⭐ | Lento (local) | Hardware |
+| Groq | ⭐⭐⭐⭐⭐ | ⚡ Ultra-rápido | Conta grátis |
+| OpenRouter | ⭐⭐⭐⭐ | Rápido | Conta grátis |
+
+### Imagens
+| Backend | Qualidade | Velocidade | Requer |
+|---|---|---|---|
+| Pollinations.ai | ⭐⭐⭐⭐ | Médio | Nada! |
+| SD Local (A1111) | ⭐⭐⭐⭐⭐ | Rápido | GPU |
+| HuggingFace | ⭐⭐⭐ | Lento | Token grátis |
+
+### TTS (Voz)
+| Backend | Qualidade | Velocidade | Requer |
+|---|---|---|---|
+| edge-tts | ⭐⭐⭐⭐⭐ | Rápido | Internet |
+| Piper TTS | ⭐⭐⭐⭐ | ⚡ Ultra-rápido | Download modelo |
+| Coqui TTS | ⭐⭐⭐ | Médio | Instalação |
+| gTTS | ⭐⭐⭐ | Rápido | Internet |
+
+---
+
+## 🚀 Melhorias Futuras
+
+- [ ] **Upload automático TikTok** — via TikTok Creator API
+- [ ] **Trending Topics** — integração com Google Trends / Twitter
+- [ ] **Personagens consistentes** — LoRA / IP-Adapter para SD
+- [ ] **Efeitos de texto animados** — FFmpeg drawtext avançado
+- [ ] **Templates guardados** — reutiliza configurações favoritas
+- [ ] **Scheduler** — publica automaticamente em horas de pico
+- [ ] **Analytics** — rastreia performance dos vídeos
+- [ ] **Música viral** — integração Suno AI (quando disponível)
+- [ ] **Multi-plataforma** — export para Instagram Reels, YouTube Shorts
+
+---
+
+## 📄 Licença
+
+MIT License — Uso livre, incluindo comercial.
+
+---
+
+## 🤝 Contribuições
+
+PRs são bem-vindos! Abre uma issue para discutir melhorias.
