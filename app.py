@@ -246,14 +246,7 @@ css = """
 footer { display: none !important; }
 """
 
-with gr.Blocks(
-    title="🎬 TikTok Video Generator",
-    theme=gr.themes.Soft(
-        primary_hue="violet",
-        secondary_hue="pink",
-    ),
-    css=css
-) as app:
+with gr.Blocks(title="🎬 TikTok Video Generator") as app:
 
     gr.HTML("""
     <div style="text-align:center; padding: 20px 0 10px">
@@ -492,6 +485,6 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port,
         share=False,
-        show_api=False,
-        favicon_path=None,
+        theme=gr.themes.Soft(primary_hue="violet", secondary_hue="pink"),
+        css=css,
     )
