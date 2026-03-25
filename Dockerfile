@@ -10,27 +10,24 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Diretório de trabalho
 WORKDIR /app
 
-# Copia requirements e instala dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia o resto do projeto
 COPY . .
 
-# Cria diretórios de output
+# CRÍTICO: apaga a pasta 'queue' que conflitua com o módulo Python
+RUN rm -rf /app/queue
+
+# Cria diretórios necessários
 RUN mkdir -p output/videos output/images output/audio output/logs \
     assets/music assets/fonts templates job_queue
 
-# Expõe a porta do Gradio
 EXPOSE 7860
 
-# Variáveis de ambiente padrão
 ENV PYTHONUNBUFFERED=1
 ENV TTS_ENGINE=edge-tts
 ENV SD_USE_LOCAL=false
 
-# Comando de arranque
 CMD ["python", "app.py"]
