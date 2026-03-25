@@ -22,7 +22,7 @@ COPY . .
 
 # Cria diretórios de output
 RUN mkdir -p output/videos output/images output/audio output/logs \
-    assets/music assets/fonts templates queue
+    assets/music assets/fonts templates job_queue
 
 # Expõe a porta do Gradio
 EXPOSE 7860

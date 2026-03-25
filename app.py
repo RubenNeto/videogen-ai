@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config.settings import THEMES, SUBTITLE_STYLES, VIDEO_FORMAT, VIDEOS_DIR
 from pipeline import VideoGenerationPipeline
-from queue.video_queue import VideoQueue, JobStatus
+from job_queue.video_queue import VideoQueue, JobStatus
 
 # Setup logging
 logging.basicConfig(
