@@ -1,17 +1,22 @@
 """
-Interface Web com Gradio - UI 2026 Redesign
-TikTok Video Generator - Creator Studio
+TikTok Creator Studio — UI 2026 Complete Rebuild
+Fixes: asyncio, filesystem, error feedback, diagnostics, UX
 """
 
 import gradio as gr
 import logging
 import sys
 import time
+import os
+import json
+import threading
 from pathlib import Path
+from datetime import datetime
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config.settings import THEMES, SUBTITLE_STYLES, VIDEO_FORMAT, VIDEOS_DIR
-from pipeline import VideoGenerationPipeline
+from config.settings import THEMES, VIDEO_FORMAT, VIDEOS_DIR, LOGS_DIR
+from pipeline import VideoGenerationPipeline, get_system_diagnostics, ensure_dirs
 from job_queue.video_queue import VideoQueue, JobStatus
 
 logging.basicConfig(
@@ -20,769 +25,661 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-pipeline = None
-video_queue = None
+ensure_dirs()
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+_pipeline = None
+_video_queue = None
+_init_lock = threading.Lock()
 
 def get_pipeline():
-    global pipeline, video_queue
-    if pipeline is None:
-        pipeline = VideoGenerationPipeline()
-        video_queue = VideoQueue(pipeline)
-        video_queue.start(num_workers=2)
-    return pipeline, video_queue
+    global _pipeline, _video_queue
+    if _pipeline is None:
+        with _init_lock:
+            if _pipeline is None:
+                _pipeline = VideoGenerationPipeline()
+                _video_queue = VideoQueue(_pipeline)
+                _video_queue.start(num_workers=1)
+    return _pipeline, _video_queue
 
-# ─── Lógica ───────────────────────────────────────────────────────────────────
-
+# ── Maps ──────────────────────────────────────────────────────────────────────
 VOICE_MAP = {
-    "Feminina PT 🇵🇹": "pt_female",
-    "Masculina PT 🇵🇹": "pt_male",
-    "Feminine EN 🇬🇧": "en_female",
-    "Masculine EN 🇬🇧": "en_male",
-    "Femenina ES 🇪🇸": "es_female",
-    "Masculino ES 🇪🇸": "es_male",
-    "Robótica 🤖": "robotic",
+    "Raquela · Feminina PT": "pt_female",
+    "Duarte · Masculino PT": "pt_male",
+    "Jenny · Feminine EN":   "en_female",
+    "Guy · Masculine EN":    "en_male",
+    "Elvira · Femenina ES":  "es_female",
+    "Robótica 🤖":           "robotic",
 }
 LANG_MAP = {
-    "Português 🇵🇹": "pt",
-    "English 🇬🇧": "en",
-    "Español 🇪🇸": "es",
-    "Français 🇫🇷": "fr",
+    "🇵🇹 Português": "pt",
+    "🇬🇧 English":   "en",
+    "🇪🇸 Español":   "es",
+    "🇫🇷 Français":  "fr",
 }
-THEME_MAP = {v["name"]: k for k, v in THEMES.items()}
-THEME_CHOICES = [f"{v['emoji']} {v['name']}" for v in THEMES.values()]
 THEME_EMOJI_MAP = {f"{v['emoji']} {v['name']}": k for k, v in THEMES.items()}
+THEME_CHOICES   = [f"{v['emoji']} {v['name']}" for v in THEMES.values()]
+VOICE_CHOICES   = list(VOICE_MAP.keys())
+LANG_CHOICES    = list(LANG_MAP.keys())
+STYLE_CHOICES   = ["tiktok", "neon", "classic", "minimal"]
+DUR_CHOICES     = [15, 30, 60]
 
-def generate_single_video(
-    theme_full, duration, voice_type, language,
-    subtitle_style, topic, add_music, music_volume,
-    progress=gr.Progress()
-):
+STEP_LABELS = [
+    ("1", "Script", "📝"),
+    ("2", "Cenas",  "🎬"),
+    ("3", "Imagens","🎨"),
+    ("4", "Voz",    "🔊"),
+    ("5", "Legendas","💬"),
+    ("6", "Vídeo",  "🎥"),
+]
+
+# ── State tracking ─────────────────────────────────────────────────────────────
+_current_step = [0]
+_current_msg  = [""]
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _steps_html(active: int) -> str:
+    items = ""
+    for num, label, icon in STEP_LABELS:
+        n = int(num)
+        if n < active:
+            cls = "step-done"
+            ico = "✓"
+        elif n == active:
+            cls = "step-active"
+            ico = icon
+        else:
+            cls = "step-pending"
+            ico = num
+        items += f'<div class="step-item {cls}"><span class="step-ico">{ico}</span><span class="step-lbl">{label}</span></div>'
+    return f'<div class="steps-bar">{items}</div>'
+
+def _result_html(result: dict, duration) -> str:
+    if not result["success"]:
+        err = result.get("error", "Erro desconhecido")
+        log = result.get("log_path", "")
+        return f"""
+<div class="res-card err-card">
+  <div class="res-header"><span class="badge badge-err">✗ FALHOU</span></div>
+  <div class="err-msg">{err}</div>
+  <div class="err-hint">
+    💡 Verifica se <code>GROQ_API_KEY</code> está definida no Railway.<br>
+    💡 Usa o separador <strong>Diagnóstico</strong> para ver o estado do sistema.<br>
+    📋 Log: <code>{log}</code>
+  </div>
+</div>"""
+
+    script = result.get("script", {})
+    hook   = script.get("hook", "—")
+    cenas  = script.get("cenas", [])
+    tags   = " ".join(script.get("hashtags", []))
+    dur    = result.get("duration_real", duration)
+    size   = result.get("size_mb", 0)
+    elapsed= result.get("elapsed_seconds", 0)
+    nc     = result.get("scenes_count", 0)
+    ni     = result.get("images_generated", nc)
+    na     = result.get("audio_generated", nc)
+    fname  = result.get("video_name", "")
+
+    scene_rows = "".join(
+        f'<div class="scene-row"><span class="sn">{i+1}</span><span class="st">{c.get("texto","")}</span></div>'
+        for i, c in enumerate(cenas[:6])
+    )
+
+    return f"""
+<div class="res-card ok-card">
+  <div class="res-header">
+    <span class="badge badge-ok">✓ GERADO</span>
+    <span class="res-fname">{fname}</span>
+  </div>
+  <div class="res-stats">
+    <div class="rs"><span class="rv">{dur:.0f}s</span><span class="rl">Duração</span></div>
+    <div class="rs"><span class="rv">{nc}</span><span class="rl">Cenas</span></div>
+    <div class="rs"><span class="rv">{ni}/{nc}</span><span class="rl">Imagens</span></div>
+    <div class="rs"><span class="rv">{na}/{nc}</span><span class="rl">Áudios</span></div>
+    <div class="rs"><span class="rv">{size:.1f}MB</span><span class="rl">Tamanho</span></div>
+    <div class="rs"><span class="rv">{elapsed:.0f}s</span><span class="rl">Tempo</span></div>
+  </div>
+  <div class="hook-box"><span class="hook-lbl">HOOK</span><span class="hook-txt">"{hook}"</span></div>
+  <div class="scenes-box"><div class="scenes-lbl">SCRIPT</div>{scene_rows}</div>
+  <div class="tags-row">{tags}</div>
+</div>"""
+
+def _diag_html(d: dict) -> str:
+    def ok(v): return f'<span class="dv dv-ok">{"OK" if v else "FALHOU"}</span>'
+    def val(v): return f'<span class="dv {"dv-ok" if v and v != "NOT SET" else "dv-err"}">{v}</span>'
+
+    rows = f"""
+<div class="diag-grid">
+  <div class="diag-row"><span class="dk">FFmpeg</span>{ok(d.get("ffmpeg"))}</div>
+  <div class="diag-row"><span class="dk">FFprobe</span>{ok(d.get("ffprobe"))}</div>
+  <div class="diag-row"><span class="dk">edge-tts</span>{ok(d.get("edge_tts"))}</div>
+  <div class="diag-row"><span class="dk">gTTS</span>{ok(d.get("gtts"))}</div>
+  <div class="diag-row"><span class="dk">Pillow</span>{ok(d.get("pillow"))}</div>
+  <div class="diag-row"><span class="dk">Pollinations</span>{ok(d.get("pollinations_reachable"))}</div>
+  <div class="diag-row"><span class="dk">Disco escrita</span>{ok(d.get("disk_writable"))}</div>
+  <div class="diag-row"><span class="dk">GROQ_API_KEY</span>{val(d["env_vars"].get("GROQ_API_KEY","NOT SET"))}</div>
+  <div class="diag-row"><span class="dk">TTS_ENGINE</span>{val(d["env_vars"].get("TTS_ENGINE","not set"))}</div>
+  <div class="diag-row"><span class="dk">PORT</span>{val(d["env_vars"].get("PORT","not set"))}</div>
+</div>
+<div class="diag-ts">Verificado: {d.get("timestamp","")}</div>"""
+
+    if not d.get("groq_key_set"):
+        rows += '<div class="diag-warn">⚠️ GROQ_API_KEY não definida — scripts em modo fallback (qualidade reduzida). Define em Railway → Variables.</div>'
+    if not d.get("ffmpeg"):
+        rows += '<div class="diag-warn">⚠️ FFmpeg não encontrado — geração de vídeo vai falhar.</div>'
+    if not d.get("pollinations_reachable"):
+        rows += '<div class="diag-warn">⚠️ Pollinations.ai inacessível — imagens em placeholder.</div>'
+    if not d.get("edge_tts") and not d.get("gtts"):
+        rows += '<div class="diag-warn">⚠️ Nenhum engine TTS disponível — áudio silencioso.</div>'
+
+    return f'<div class="diag-card">{rows}</div>'
+
+def _queue_html() -> str:
+    if _video_queue is None:
+        return '<div class="empty-state">Fila não iniciada. Gera um vídeo primeiro.</div>'
+    jobs = _video_queue.get_all_jobs()
+    if not jobs:
+        return '<div class="empty-state">Fila vazia.</div>'
+
+    status_cls = {"pending":"sq-pending","running":"sq-running","completed":"sq-done","failed":"sq-err","cancelled":"sq-cancel"}
+    status_ico = {"pending":"⏳","running":"▶","completed":"✓","failed":"✗","cancelled":"○"}
+
+    rows = ""
+    for job in sorted(jobs, key=lambda x: x.get("created_at",""), reverse=True)[:15]:
+        s   = job["status"]
+        cls = status_cls.get(s,"")
+        ico = status_ico.get(s,"?")
+        jid = job["job_id"]
+        cfg = job.get("config", {})
+        theme = cfg.get("theme","?")
+        dur   = cfg.get("duration","?")
+        msg   = job.get("progress_message","")
+        step  = job.get("progress_step",0)
+        total = job.get("progress_total",6)
+        pct   = int(step/max(total,1)*100)
+        pb    = f'<div class="qpb"><div class="qpb-f" style="width:{pct}%"></div></div>' if s=="running" else ""
+        rows += f'<div class="qrow {cls}"><span class="qi">{ico}</span><code class="qid">{jid}</code><span class="qth">{theme}·{dur}s</span><span class="qmsg">{msg}</span>{pb}</div>'
+
+    return f'<div class="queue-list">{rows}</div>'
+
+def _library_html() -> str:
+    vids = sorted(VIDEOS_DIR.glob(f"*.{VIDEO_FORMAT}"), key=lambda x: x.stat().st_mtime, reverse=True)
+    if not vids:
+        return '<div class="empty-state">Nenhum vídeo gerado ainda.</div>'
+    cards = ""
+    for v in vids[:30]:
+        sz  = v.stat().st_size / 1024 / 1024
+        ts  = time.strftime("%d %b %H:%M", time.localtime(v.stat().st_mtime))
+        nm  = v.stem[:30] + "…" if len(v.stem) > 30 else v.stem
+        cards += f'<div class="vcard"><div class="vthumb">▶</div><div class="vinfo"><div class="vname" title="{v.name}">{nm}</div><div class="vmeta">{sz:.1f} MB · {ts}</div></div></div>'
+    return f'<div class="vgrid">{cards}</div>'
+
+# ── Generate ───────────────────────────────────────────────────────────────────
+
+def generate_video_fn(theme_full, duration, voice_key, lang_key,
+                      style, topic, add_music, music_vol,
+                      progress=gr.Progress()):
+
+    _current_step[0] = 0
+    _current_msg[0]  = "A inicializar..."
     progress(0, desc="A inicializar agentes...")
+
     pipe, _ = get_pipeline()
 
-    def on_progress(step, total, message, job_id):
-        progress(step / total, desc=message)
+    def on_progress(step, total, msg, job_id):
+        _current_step[0] = step
+        _current_msg[0]  = msg
+        progress(step / total, desc=msg)
 
-    theme_key = THEME_EMOJI_MAP.get(theme_full, "curiosidades")
-    voice_key = VOICE_MAP.get(voice_type, "pt_female")
-    lang_key = LANG_MAP.get(language, "pt")
+    theme_k = THEME_EMOJI_MAP.get(theme_full, "curiosidades")
+    voice_k  = VOICE_MAP.get(voice_key, "pt_female")
+    lang_k   = LANG_MAP.get(lang_key, "pt")
+    dur_int  = int(duration)
 
     result = pipe.generate_video(
-        theme=theme_key,
-        duration=int(duration),
-        voice_type=voice_key,
-        language=lang_key,
-        subtitle_style=subtitle_style.lower(),
+        theme=theme_k, duration=dur_int,
+        voice_type=voice_k, language=lang_k,
+        subtitle_style=style,
         topic=topic.strip() if topic and topic.strip() else None,
-        add_music=add_music,
-        music_volume=music_volume,
-        progress_callback=on_progress
+        add_music=add_music, music_volume=music_vol,
+        progress_callback=on_progress,
     )
 
     progress(1.0, desc="Concluído!")
 
-    if result["success"]:
-        script = result.get("script", {})
-        hook = script.get("hook", "—")
-        cenas = script.get("cenas", [])
-        hashtags = " ".join(script.get("hashtags", []))
-        dur = result.get("duration_real", int(duration))
-        size = result.get("size_mb", 0)
-        elapsed = result.get("elapsed_seconds", 0)
-        scenes_count = result.get("scenes_count", 0)
-        fname = result.get("video_name", "")
+    video_path = result.get("video_path") if result["success"] else None
+    steps      = _steps_html(7 if result["success"] else _current_step[0])
+    info       = _result_html(result, dur_int)
 
-        cenas_html = "".join(
-            f'<div class="scene-item"><span class="scene-num">{i+1}</span><span class="scene-text">{c.get("texto","")}</span></div>'
-            for i, c in enumerate(cenas[:6])
-        )
+    return video_path, steps, info
 
-        info_html = f"""
-<div class="result-card">
-  <div class="result-header">
-    <span class="result-badge success">✓ GERADO</span>
-    <span class="result-file">{fname}</span>
-  </div>
-  <div class="result-stats">
-    <div class="stat"><span class="stat-val">{dur:.0f}s</span><span class="stat-label">Duração</span></div>
-    <div class="stat"><span class="stat-val">{scenes_count}</span><span class="stat-label">Cenas</span></div>
-    <div class="stat"><span class="stat-val">{size:.1f}MB</span><span class="stat-label">Tamanho</span></div>
-    <div class="stat"><span class="stat-val">{elapsed:.0f}s</span><span class="stat-label">Geração</span></div>
-  </div>
-  <div class="result-hook">
-    <span class="hook-label">HOOK</span>
-    <span class="hook-text">"{hook}"</span>
-  </div>
-  <div class="result-scenes">
-    <div class="scenes-label">CENAS</div>
-    {cenas_html}
-  </div>
-  <div class="result-hashtags">{hashtags}</div>
-</div>"""
-        return result["video_path"], info_html
-    else:
-        err = result.get("error", "Erro desconhecido")
-        return None, f'<div class="result-card error-card"><span class="result-badge error">✗ ERRO</span><p>{err}</p></div>'
+def run_diagnostics_fn():
+    diag = get_system_diagnostics()
+    return _diag_html(diag)
 
-
-def add_to_batch_queue(theme_full, duration, voice_type, language,
-                       subtitle_style, topic, add_music, music_volume, num_videos):
+def queue_add_fn(theme_full, duration, voice_key, lang_key,
+                 style, topic, add_music, music_vol, num_vids):
     _, q = get_pipeline()
-    config = {
-        "theme": THEME_EMOJI_MAP.get(theme_full, "curiosidades"),
-        "duration": int(duration),
-        "voice_type": VOICE_MAP.get(voice_type, "pt_female"),
-        "language": LANG_MAP.get(language, "pt"),
-        "subtitle_style": subtitle_style.lower(),
-        "topic": topic.strip() if topic and topic.strip() else None,
-        "add_music": add_music,
-        "music_volume": music_volume,
+    cfg = {
+        "theme":          THEME_EMOJI_MAP.get(theme_full, "curiosidades"),
+        "duration":       int(duration),
+        "voice_type":     VOICE_MAP.get(voice_key, "pt_female"),
+        "language":       LANG_MAP.get(lang_key, "pt"),
+        "subtitle_style": style,
+        "topic":          topic.strip() if topic and topic.strip() else None,
+        "add_music":      add_music,
+        "music_volume":   music_vol,
     }
-    job_ids = []
-    for _ in range(int(num_videos)):
-        job = q.add_job(config.copy())
-        job_ids.append(job.job_id)
+    ids = []
+    for _ in range(int(num_vids)):
+        job = q.add_job(cfg.copy())
+        ids.append(job.job_id)
+    ids_str = " · ".join(f"<code>{i}</code>" for i in ids)
+    return f'<div class="res-card ok-card"><div class="res-header"><span class="badge badge-ok">✓ {num_vids} JOBS CRIADOS</span></div><p style="margin-top:10px;opacity:.6;font-size:13px">{ids_str}</p></div>'
 
-    ids_str = " · ".join(f'<code>{jid}</code>' for jid in job_ids)
-    return f'<div class="result-card"><span class="result-badge success">✓ {num_videos} JOBS CRIADOS</span><p style="margin-top:12px;opacity:.7">IDs: {ids_str}</p></div>'
+def queue_refresh_fn():
+    return _queue_html()
 
+def library_refresh_fn():
+    return _library_html()
 
-def get_queue_status():
-    if video_queue is None:
-        return '<div class="queue-empty">Sistema não iniciado. Gera um vídeo primeiro.</div>'
-    jobs = video_queue.get_all_jobs()
-    if not jobs:
-        return '<div class="queue-empty">Fila vazia — nenhum job em curso.</div>'
+def read_log_fn(job_id: str) -> str:
+    if not job_id or not job_id.strip():
+        return "Introduz um Job ID para ver o log."
+    log_file = LOGS_DIR / f"{job_id.strip()}_pipeline.log"
+    if not log_file.exists():
+        return f"Log não encontrado: {log_file}"
+    try:
+        lines = log_file.read_text(encoding="utf-8").split("\n")
+        return "\n".join(lines[-80:])  # últimas 80 linhas
+    except Exception as e:
+        return f"Erro ao ler log: {e}"
 
-    status_map = {
-        "pending":   ("⏳", "status-pending"),
-        "running":   ("▶", "status-running"),
-        "completed": ("✓", "status-done"),
-        "failed":    ("✗", "status-error"),
-        "cancelled": ("○", "status-cancel"),
-    }
-
-    rows = ""
-    for job in sorted(jobs, key=lambda x: x.get("created_at",""), reverse=True)[:12]:
-        s = job["status"]
-        icon, cls = status_map.get(s, ("?", ""))
-        jid = job["job_id"]
-        theme = job.get("config", {}).get("theme", "?")
-        dur = job.get("config", {}).get("duration", "?")
-        msg = job.get("progress_message", "")
-        step = job.get("progress_step", 0)
-        total = job.get("progress_total", 6)
-        pct = int(step / max(total,1) * 100)
-
-        progress_bar = ""
-        if s == "running":
-            progress_bar = f'<div class="qpbar"><div class="qpbar-fill" style="width:{pct}%"></div></div>'
-
-        rows += f"""
-<div class="queue-row {cls}">
-  <span class="q-icon">{icon}</span>
-  <span class="q-id">{jid}</span>
-  <span class="q-theme">{theme} · {dur}s</span>
-  <span class="q-msg">{msg}</span>
-  {progress_bar}
-</div>"""
-
-    return f'<div class="queue-list">{rows}</div>'
-
-
-def list_generated_videos():
-    videos = sorted(VIDEOS_DIR.glob(f"*.{VIDEO_FORMAT}"),
-                    key=lambda x: x.stat().st_mtime, reverse=True)
-    if not videos:
-        return '<div class="queue-empty">Nenhum vídeo gerado ainda.</div>'
-
-    cards = ""
-    for v in videos[:24]:
-        size = v.stat().st_size / 1024 / 1024
-        mtime = time.strftime("%d %b · %H:%M", time.localtime(v.stat().st_mtime))
-        name_short = v.stem[:28] + "…" if len(v.stem) > 28 else v.stem
-        cards += f"""
-<div class="video-card">
-  <div class="video-thumb">▶</div>
-  <div class="video-info">
-    <div class="video-name" title="{v.name}">{name_short}</div>
-    <div class="video-meta">{size:.1f} MB · {mtime}</div>
-  </div>
-</div>"""
-
-    return f'<div class="video-grid">{cards}</div>'
-
-
-# ─── CSS ──────────────────────────────────────────────────────────────────────
-
+# ── CSS ────────────────────────────────────────────────────────────────────────
 CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-:root {
-  --bg:       #0a0a0f;
-  --surface:  #111118;
-  --card:     #16161f;
-  --border:   #252535;
-  --accent:   #ff2d55;
-  --accent2:  #bf5af2;
-  --accent3:  #0aff9d;
-  --text:     #f0f0ff;
-  --muted:    #666680;
-  --radius:   12px;
-  --font:     'Syne', sans-serif;
-  --mono:     'JetBrains Mono', monospace;
+:root{
+  --bg:#080810;--surf:#0f0f1a;--card:#141420;--border:#1e1e30;
+  --acc:#ff2d55;--acc2:#bf5af2;--acc3:#0aff9d;--acc4:#ffd60a;
+  --txt:#f0f0ff;--sub:#9090b0;--dim:#444466;
+  --r:12px;--font:'Syne',sans-serif;--mono:'JetBrains Mono',monospace;
 }
 
-/* Reset geral */
-.gradio-container {
-  background: var(--bg) !important;
-  font-family: var(--font) !important;
-  max-width: 1280px !important;
-  margin: 0 auto !important;
-  padding: 0 !important;
-}
-body, .dark { background: var(--bg) !important; }
-footer { display: none !important; }
-.svelte-1gfkn6j { display: none !important; }
+/* Base */
+.gradio-container{background:var(--bg)!important;font-family:var(--font)!important;max-width:1320px!important;margin:0 auto!important;padding:0!important}
+body,.dark{background:var(--bg)!important}
+footer,.svelte-1gfkn6j{display:none!important}
 
-/* Inputs & labels */
-label, .label-wrap { color: var(--muted) !important; font-family: var(--mono) !important; font-size: 10px !important; letter-spacing: 0.12em !important; text-transform: uppercase !important; }
-input, textarea, select, .wrap { background: var(--card) !important; border: 1px solid var(--border) !important; border-radius: var(--radius) !important; color: var(--text) !important; font-family: var(--font) !important; }
-input:focus, textarea:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 2px rgba(255,45,85,.15) !important; outline: none !important; }
-.block { background: transparent !important; border: none !important; padding: 0 !important; }
+/* Inputs */
+label,.label-wrap{color:var(--sub)!important;font-family:var(--mono)!important;font-size:10px!important;letter-spacing:.12em!important;text-transform:uppercase!important}
+input,textarea,select,.wrap{background:var(--card)!important;border:1px solid var(--border)!important;border-radius:var(--r)!important;color:var(--txt)!important;font-family:var(--font)!important}
+input:focus,textarea:focus{border-color:var(--acc)!important;box-shadow:0 0 0 2px rgba(255,45,85,.12)!important;outline:none!important}
+.block{background:transparent!important;border:none!important;padding:0!important}
+ul.options{background:var(--card)!important;border:1px solid var(--border)!important;border-radius:var(--r)!important}
+ul.options li{color:var(--txt)!important}
+ul.options li:hover,ul.options li.selected{background:rgba(255,45,85,.1)!important;color:var(--acc)!important}
+input[type=range]{accent-color:var(--acc)!important}
+input[type=checkbox]{accent-color:var(--acc)!important}
+.wrap.svelte-a4qna4{background:transparent!important;border:none!important}
 
-/* Dropdowns */
-.dropdown-arrow, svg { color: var(--muted) !important; }
-ul.options { background: var(--card) !important; border: 1px solid var(--border) !important; border-radius: var(--radius) !important; }
-ul.options li { color: var(--text) !important; }
-ul.options li:hover, ul.options li.selected { background: rgba(255,45,85,.12) !important; color: var(--accent) !important; }
-
-/* Slider */
-input[type=range] { accent-color: var(--accent) !important; }
-
-/* Checkbox */
-input[type=checkbox] { accent-color: var(--accent) !important; }
+/* Radio */
+.wrap.svelte-1oiin9d,.svelte-1oiin9d{background:transparent!important}
+input[type=radio]{accent-color:var(--acc)!important}
+.radio-group .wrap{display:flex!important;gap:8px!important;flex-wrap:wrap!important}
 
 /* Tabs */
-.tabs { border: none !important; background: transparent !important; }
-.tab-nav { background: var(--surface) !important; border-bottom: 1px solid var(--border) !important; padding: 0 24px !important; gap: 0 !important; border-radius: 0 !important; }
-.tab-nav button {
-  background: transparent !important;
-  border: none !important;
-  border-bottom: 2px solid transparent !important;
-  color: var(--muted) !important;
-  font-family: var(--mono) !important;
-  font-size: 11px !important;
-  letter-spacing: .1em !important;
-  padding: 16px 20px !important;
-  border-radius: 0 !important;
-  transition: all .2s !important;
-  text-transform: uppercase !important;
-}
-.tab-nav button.selected {
-  color: var(--accent) !important;
-  border-bottom-color: var(--accent) !important;
-  background: transparent !important;
-}
-.tab-nav button:hover { color: var(--text) !important; }
-.tabitem { background: transparent !important; border: none !important; padding: 32px 24px !important; }
+.tabs{border:none!important;background:transparent!important}
+.tab-nav{background:var(--surf)!important;border-bottom:1px solid var(--border)!important;padding:0 28px!important;border-radius:0!important;gap:0!important}
+.tab-nav button{background:transparent!important;border:none!important;border-bottom:2px solid transparent!important;color:var(--sub)!important;font-family:var(--mono)!important;font-size:10px!important;letter-spacing:.15em!important;padding:18px 22px!important;border-radius:0!important;transition:all .2s!important;text-transform:uppercase!important}
+.tab-nav button.selected{color:var(--acc)!important;border-bottom-color:var(--acc)!important}
+.tab-nav button:hover{color:var(--txt)!important}
+.tabitem{background:transparent!important;border:none!important;padding:32px 28px!important}
 
-/* Botão primário */
-button.primary, .primary {
-  background: linear-gradient(135deg, var(--accent), var(--accent2)) !important;
-  border: none !important;
-  border-radius: var(--radius) !important;
-  color: #fff !important;
-  font-family: var(--mono) !important;
-  font-size: 12px !important;
-  font-weight: 500 !important;
-  letter-spacing: .12em !important;
-  text-transform: uppercase !important;
-  padding: 14px 28px !important;
-  transition: all .2s !important;
-  box-shadow: 0 4px 24px rgba(255,45,85,.25) !important;
-}
-button.primary:hover { transform: translateY(-1px) !important; box-shadow: 0 8px 32px rgba(255,45,85,.35) !important; }
-button.secondary {
-  background: var(--card) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius) !important;
-  color: var(--text) !important;
-  font-family: var(--mono) !important;
-  font-size: 11px !important;
-  letter-spacing: .1em !important;
-  text-transform: uppercase !important;
-  transition: all .2s !important;
-}
-button.secondary:hover { border-color: var(--accent) !important; color: var(--accent) !important; }
+/* Buttons */
+button.primary,.primary{background:linear-gradient(135deg,var(--acc),var(--acc2))!important;border:none!important;border-radius:var(--r)!important;color:#fff!important;font-family:var(--mono)!important;font-size:11px!important;font-weight:600!important;letter-spacing:.15em!important;text-transform:uppercase!important;padding:14px 28px!important;transition:all .2s!important;box-shadow:0 4px 24px rgba(255,45,85,.2)!important}
+button.primary:hover{transform:translateY(-2px)!important;box-shadow:0 8px 32px rgba(255,45,85,.35)!important}
+button.secondary{background:var(--card)!important;border:1px solid var(--border)!important;border-radius:var(--r)!important;color:var(--sub)!important;font-family:var(--mono)!important;font-size:10px!important;letter-spacing:.12em!important;text-transform:uppercase!important;transition:all .2s!important}
+button.secondary:hover{border-color:var(--acc)!important;color:var(--acc)!important}
 
-/* Progress bar */
-.progress-bar { background: var(--border) !important; border-radius: 99px !important; }
-.progress-bar > div { background: linear-gradient(90deg, var(--accent), var(--accent2)) !important; border-radius: 99px !important; }
+/* Progress */
+.progress-bar{background:var(--border)!important;border-radius:99px!important}
+.progress-bar>div{background:linear-gradient(90deg,var(--acc),var(--acc2))!important;border-radius:99px!important}
 
-/* Video player */
-video { border-radius: var(--radius) !important; background: var(--card) !important; }
-.video-container { background: var(--card) !important; border: 1px solid var(--border) !important; border-radius: var(--radius) !important; }
+/* Video */
+video{border-radius:var(--r)!important}
+.video-container{background:var(--card)!important;border:1px solid var(--border)!important;border-radius:var(--r)!important}
 
 /* ── HEADER ── */
-.studio-header {
-  background: linear-gradient(180deg, rgba(255,45,85,.06) 0%, transparent 100%);
-  border-bottom: 1px solid var(--border);
-  padding: 32px 24px 24px;
-  text-align: center;
-}
-.studio-logo {
-  font-family: var(--font);
-  font-size: 13px;
-  font-weight: 800;
-  letter-spacing: .3em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 12px;
-}
-.studio-title {
-  font-family: var(--font);
-  font-size: clamp(2rem, 5vw, 3.5rem);
-  font-weight: 800;
-  color: var(--text);
-  letter-spacing: -.02em;
-  line-height: 1;
-  margin-bottom: 8px;
-}
-.studio-title span { color: var(--accent); }
-.studio-sub {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-.studio-pills {
-  display: flex;
-  gap: 8px;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin-top: 20px;
-}
-.pill {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 99px;
-  padding: 5px 14px;
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--muted);
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-.pill.hot { border-color: rgba(255,45,85,.4); color: var(--accent); }
-.pill.green { border-color: rgba(10,255,157,.3); color: var(--accent3); }
+.hdr{background:linear-gradient(180deg,rgba(255,45,85,.05) 0%,transparent 100%);border-bottom:1px solid var(--border);padding:36px 28px 28px;text-align:center}
+.hdr-eyebrow{font-family:var(--mono);font-size:10px;letter-spacing:.35em;color:var(--dim);text-transform:uppercase;margin-bottom:14px}
+.hdr-title{font-family:var(--font);font-size:clamp(2.2rem,5vw,4rem);font-weight:800;color:var(--txt);letter-spacing:-.03em;line-height:1;margin-bottom:10px}
+.hdr-title em{color:var(--acc);font-style:normal}
+.hdr-sub{font-family:var(--mono);font-size:11px;color:var(--sub);letter-spacing:.1em}
+.hdr-pills{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:22px}
+.pill{background:var(--card);border:1px solid var(--border);border-radius:99px;padding:5px 14px;font-family:var(--mono);font-size:9px;color:var(--sub);letter-spacing:.1em;text-transform:uppercase}
+.pill.p-red{border-color:rgba(255,45,85,.35);color:var(--acc)}
+.pill.p-grn{border-color:rgba(10,255,157,.25);color:var(--acc3)}
+.pill.p-pur{border-color:rgba(191,90,242,.25);color:var(--acc2)}
 
-/* ── SECTION LABELS ── */
-.section-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .2em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.section-label::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-}
+/* ── SECTION LABEL ── */
+.slabel{font-family:var(--mono);font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--dim);display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.slabel::after{content:'';flex:1;height:1px;background:var(--border)}
 
-/* ── THEME CARDS ── */
-.theme-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  margin-bottom: 4px;
-}
-.theme-chip {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 8px;
-  text-align: center;
-  cursor: pointer;
-  transition: all .15s;
-  font-family: var(--font);
-  font-size: 11px;
-  color: var(--muted);
-}
-.theme-chip:hover { border-color: var(--accent); color: var(--text); }
-.theme-chip.active { border-color: var(--accent); background: rgba(255,45,85,.08); color: var(--accent); }
-
-/* ── RESULT CARD ── */
-.result-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  font-family: var(--font);
-  animation: fadeUp .3s ease;
-}
-@keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-.result-header { display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
-.result-badge {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .15em;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-weight: 500;
-}
-.result-badge.success { background: rgba(10,255,157,.12); color: var(--accent3); border: 1px solid rgba(10,255,157,.2); }
-.result-badge.error { background: rgba(255,45,85,.12); color: var(--accent); border: 1px solid rgba(255,45,85,.2); }
-.result-file { font-family: var(--mono); font-size: 10px; color: var(--muted); }
-.result-stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: var(--border);
-  border-radius: 10px;
-  overflow: hidden;
-  margin-bottom: 16px;
-}
-.stat { background: var(--surface); padding: 12px 8px; text-align: center; }
-.stat-val { display:block; font-family: var(--mono); font-size: 20px; font-weight:500; color: var(--text); }
-.stat-label { display:block; font-family: var(--mono); font-size: 9px; letter-spacing:.1em; text-transform:uppercase; color: var(--muted); margin-top:2px; }
-.result-hook {
-  display:flex; align-items:flex-start; gap:10px;
-  background: rgba(191,90,242,.08);
-  border: 1px solid rgba(191,90,242,.15);
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-bottom: 14px;
-}
-.hook-label { font-family:var(--mono); font-size:9px; letter-spacing:.15em; color: var(--accent2); text-transform:uppercase; white-space:nowrap; padding-top:2px; }
-.hook-text { font-size:14px; color:var(--text); line-height:1.4; }
-.result-scenes { margin-bottom:12px; }
-.scenes-label { font-family:var(--mono); font-size:9px; letter-spacing:.15em; color:var(--muted); text-transform:uppercase; margin-bottom:8px; }
-.scene-item { display:flex; gap:10px; align-items:flex-start; padding:6px 0; border-bottom:1px solid var(--border); }
-.scene-item:last-child { border:none; }
-.scene-num { font-family:var(--mono); font-size:10px; color:var(--accent); min-width:16px; padding-top:2px; }
-.scene-text { font-size:13px; color:var(--text); line-height:1.4; opacity:.85; }
-.result-hashtags { font-family:var(--mono); font-size:11px; color:var(--accent2); letter-spacing:.04em; }
-
-/* ── QUEUE ── */
-.queue-list { display:flex; flex-direction:column; gap:4px; }
-.queue-row {
-  display:grid;
-  grid-template-columns: 28px 80px 1fr auto;
-  align-items:center;
-  gap:12px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 14px;
-  font-family: var(--mono);
-  font-size: 11px;
-}
-.queue-row.status-running { border-color: rgba(191,90,242,.25); }
-.queue-row.status-done { border-color: rgba(10,255,157,.15); }
-.queue-row.status-error { border-color: rgba(255,45,85,.2); }
-.q-icon { font-size:14px; text-align:center; }
-.status-running .q-icon { color:var(--accent2); animation: spin 2s linear infinite; }
-.status-done .q-icon { color:var(--accent3); }
-.status-error .q-icon { color:var(--accent); }
-.status-pending .q-icon { color:var(--muted); }
-@keyframes spin { to { transform: rotate(360deg); } }
-.q-id { color:var(--accent); font-size:10px; }
-.q-theme { color:var(--text); }
-.q-msg { color:var(--muted); font-size:10px; text-align:right; }
-.qpbar { grid-column:1/-1; height:2px; background:var(--border); border-radius:99px; }
-.qpbar-fill { height:100%; background:linear-gradient(90deg,var(--accent),var(--accent2)); border-radius:99px; transition:width .5s ease; }
-.queue-empty { font-family:var(--mono); font-size:11px; color:var(--muted); letter-spacing:.08em; padding:24px; text-align:center; text-transform:uppercase; border:1px dashed var(--border); border-radius:var(--radius); }
-
-/* ── VIDEO GRID ── */
-.video-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; }
-.video-card { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; transition:all .2s; cursor:pointer; }
-.video-card:hover { border-color:var(--accent); transform:translateY(-2px); }
-.video-thumb { background:linear-gradient(135deg,#1a0a1e,#0a0a1a); height:120px; display:flex; align-items:center; justify-content:center; font-size:28px; color:var(--border); }
-.video-card:hover .video-thumb { color:var(--accent); }
-.video-info { padding:10px 12px; }
-.video-name { font-family:var(--mono); font-size:10px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:4px; }
-.video-meta { font-family:var(--mono); font-size:9px; color:var(--muted); }
+/* ── STEPS BAR ── */
+.steps-bar{display:flex;gap:4px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.step-item{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;font-family:var(--mono);font-size:10px;border:1px solid var(--border);background:var(--card);color:var(--dim);letter-spacing:.06em;text-transform:uppercase;transition:all .3s}
+.step-done{background:rgba(10,255,157,.06)!important;border-color:rgba(10,255,157,.2)!important;color:var(--acc3)!important}
+.step-active{background:rgba(255,45,85,.08)!important;border-color:rgba(255,45,85,.3)!important;color:var(--acc)!important;animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,45,85,.3)}50%{box-shadow:0 0 0 6px rgba(255,45,85,0)}}
+.step-ico{font-size:12px}
+.step-lbl{font-size:9px}
 
 /* ── CONFIG PANEL ── */
-.config-panel {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 24px;
-}
-.config-divider { height:1px; background:var(--border); margin:20px 0; }
+.cpanel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:24px 22px}
+.cdivider{height:1px;background:var(--border);margin:18px 0}
 
-/* ── GENERATE BTN ── */
-.gen-btn-wrap { margin-top: 4px; }
-.gen-btn-wrap button {
-  width: 100% !important;
-  height: 52px !important;
-  font-size: 13px !important;
-  letter-spacing: .2em !important;
-  position: relative;
-  overflow: hidden;
-}
+/* ── RESULT CARD ── */
+.res-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;animation:fadeUp .35s ease;font-family:var(--font)}
+.ok-card{border-color:rgba(10,255,157,.15)}
+.err-card{border-color:rgba(255,45,85,.25)}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.res-header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.badge{font-family:var(--mono);font-size:9px;letter-spacing:.18em;padding:4px 10px;border-radius:6px;font-weight:600;text-transform:uppercase}
+.badge-ok{background:rgba(10,255,157,.1);color:var(--acc3);border:1px solid rgba(10,255,157,.2)}
+.badge-err{background:rgba(255,45,85,.1);color:var(--acc);border:1px solid rgba(255,45,85,.2)}
+.res-fname{font-family:var(--mono);font-size:10px;color:var(--dim)}
+.res-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px}
+.rs{background:var(--surf);padding:12px 6px;text-align:center}
+.rv{display:block;font-family:var(--mono);font-size:18px;font-weight:600;color:var(--txt)}
+.rl{display:block;font-family:var(--mono);font-size:8px;letter-spacing:.1em;text-transform:uppercase;color:var(--sub);margin-top:2px}
+.hook-box{display:flex;align-items:flex-start;gap:10px;background:rgba(191,90,242,.07);border:1px solid rgba(191,90,242,.15);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.hook-lbl{font-family:var(--mono);font-size:8px;letter-spacing:.15em;color:var(--acc2);text-transform:uppercase;white-space:nowrap;padding-top:3px}
+.hook-txt{font-size:14px;color:var(--txt);line-height:1.5}
+.scenes-box{margin-bottom:12px}
+.scenes-lbl{font-family:var(--mono);font-size:8px;letter-spacing:.15em;color:var(--sub);text-transform:uppercase;margin-bottom:8px}
+.scene-row{display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--border)}
+.scene-row:last-child{border:none}
+.sn{font-family:var(--mono);font-size:10px;color:var(--acc);min-width:16px;padding-top:2px}
+.st{font-size:13px;color:var(--txt);opacity:.8;line-height:1.4}
+.tags-row{font-family:var(--mono);font-size:11px;color:var(--acc2);letter-spacing:.04em}
+.err-msg{font-family:var(--mono);font-size:12px;color:var(--acc);background:rgba(255,45,85,.06);border-radius:8px;padding:12px 14px;margin:12px 0;word-break:break-all}
+.err-hint{font-size:13px;color:var(--sub);line-height:1.8}
+.err-hint code{background:var(--surf);padding:2px 7px;border-radius:5px;font-family:var(--mono);font-size:11px;color:var(--acc3)}
+.err-hint strong{color:var(--txt)}
 
-/* ── INSTALL GUIDE ── */
-.install-guide { max-width: 720px; margin: 0 auto; }
-.install-guide h2 { font-family:var(--font); font-size:22px; font-weight:700; color:var(--text); margin:32px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
-.install-guide h3 { font-family:var(--mono); font-size:12px; letter-spacing:.1em; color:var(--accent2); text-transform:uppercase; margin:20px 0 8px; }
-.install-guide p { color:var(--muted); font-size:14px; line-height:1.7; margin:8px 0; }
-.install-guide code { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:2px 8px; font-family:var(--mono); font-size:12px; color:var(--accent3); }
-.install-guide pre { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; font-family:var(--mono); font-size:12px; color:var(--text); overflow-x:auto; margin:12px 0; line-height:1.6; }
-.roadmap-item { display:flex; gap:12px; align-items:flex-start; padding:10px 0; border-bottom:1px solid var(--border); }
-.roadmap-item:last-child { border:none; }
-.roadmap-dot { width:8px; height:8px; border-radius:50%; background:var(--border); margin-top:6px; flex-shrink:0; }
-.roadmap-item.soon .roadmap-dot { background:var(--accent); box-shadow:0 0 8px var(--accent); }
-.roadmap-item .roadmap-text { font-size:14px; color:var(--muted); }
-.roadmap-item.soon .roadmap-text { color:var(--text); }
+/* ── QUEUE ── */
+.queue-list{display:flex;flex-direction:column;gap:4px}
+.qrow{display:grid;grid-template-columns:24px 72px 1fr auto;gap:10px;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px}
+.sq-running{border-color:rgba(191,90,242,.3)!important}
+.sq-done{border-color:rgba(10,255,157,.15)!important}
+.sq-err{border-color:rgba(255,45,85,.2)!important}
+.qi{font-size:13px;text-align:center}
+.sq-running .qi{color:var(--acc2)}
+.sq-done .qi{color:var(--acc3)}
+.sq-err .qi{color:var(--acc)}
+.sq-pending .qi{color:var(--dim)}
+.qid{font-size:10px;color:var(--acc)}
+.qth{color:var(--txt);font-size:10px}
+.qmsg{color:var(--sub);font-size:10px;text-align:right}
+.qpb{grid-column:1/-1;height:2px;background:var(--border);border-radius:99px}
+.qpb-f{height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:99px;transition:width .6s ease}
+.empty-state{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;padding:28px;text-align:center;border:1px dashed var(--border);border-radius:var(--r)}
+
+/* ── LIBRARY ── */
+.vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.vcard{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;cursor:pointer;transition:all .2s}
+.vcard:hover{border-color:var(--acc);transform:translateY(-2px)}
+.vthumb{background:linear-gradient(135deg,#160820,#080815);height:110px;display:flex;align-items:center;justify-content:center;font-size:26px;color:var(--border)}
+.vcard:hover .vthumb{color:var(--acc)}
+.vinfo{padding:10px 12px}
+.vname{font-family:var(--mono);font-size:9px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
+.vmeta{font-family:var(--mono);font-size:9px;color:var(--sub)}
+
+/* ── DIAGNOSTICS ── */
+.diag-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:22px}
+.diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;margin-bottom:16px}
+.diag-row{display:flex;justify-content:space-between;align-items:center;background:var(--surf);border-radius:8px;padding:9px 14px;font-family:var(--mono);font-size:10px}
+.dk{color:var(--sub)}
+.dv{padding:3px 8px;border-radius:5px;font-weight:600;font-size:9px;letter-spacing:.1em}
+.dv-ok{background:rgba(10,255,157,.1);color:var(--acc3);border:1px solid rgba(10,255,157,.2)}
+.dv-err{background:rgba(255,45,85,.1);color:var(--acc);border:1px solid rgba(255,45,85,.2)}
+.diag-warn{background:rgba(255,214,10,.06);border:1px solid rgba(255,214,10,.2);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--acc4);margin-top:8px;line-height:1.6}
+.diag-ts{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:8px}
+
+/* ── LOG VIEWER ── */
+.log-out textarea{font-family:var(--mono)!important;font-size:10px!important;color:var(--acc3)!important;background:var(--surf)!important;line-height:1.5!important}
+
+/* ── SETUP ── */
+.setup-wrap{max-width:740px;margin:0 auto}
+.setup-wrap h2{font-family:var(--font);font-size:20px;font-weight:700;color:var(--txt);margin:32px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.setup-wrap h3{font-family:var(--mono);font-size:10px;letter-spacing:.15em;color:var(--acc2);text-transform:uppercase;margin:18px 0 8px}
+.setup-wrap p{color:var(--sub);font-size:14px;line-height:1.7}
+.setup-wrap code{background:var(--surf);border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-family:var(--mono);font-size:11px;color:var(--acc3)}
+.setup-wrap pre{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;font-family:var(--mono);font-size:11px;color:var(--txt);overflow-x:auto;margin:10px 0;line-height:1.65}
+.rmap{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-top:8px}
+.ritem{display:flex;gap:14px;align-items:flex-start;padding:11px 16px;border-bottom:1px solid var(--border)}
+.ritem:last-child{border:none}
+.rdot{width:7px;height:7px;border-radius:50%;background:var(--border);margin-top:7px;flex-shrink:0}
+.ritem.hot .rdot{background:var(--acc);box-shadow:0 0 8px var(--acc)}
+.ritem.hot .rtxt{color:var(--txt)}
+.rtxt{font-size:13px;color:var(--sub)}
+
+/* ── FOOTER ── */
+.ftr{border-top:1px solid var(--border);padding:16px 28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.ftr span{font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.1em;text-transform:uppercase}
 """
 
-# ─── Interface ────────────────────────────────────────────────────────────────
-
-theme_choices_ui = THEME_CHOICES
-voice_choices_ui = list(VOICE_MAP.keys())
-lang_choices_ui  = list(LANG_MAP.keys())
-style_choices_ui = ["tiktok", "neon", "classic", "minimal"]
-dur_choices_ui   = [15, 30, 60]
-
+# ── App ────────────────────────────────────────────────────────────────────────
 with gr.Blocks(title="TikTok Creator Studio") as app:
 
     gr.HTML("""
-    <div class="studio-header">
-      <div class="studio-logo">▲ Creator Studio</div>
-      <div class="studio-title">TikTok <span>AI</span> Generator</div>
-      <div class="studio-sub">Multi-agent · Autonomous · 2026</div>
-      <div class="studio-pills">
-        <span class="pill hot">6 Agentes IA</span>
-        <span class="pill green">100% Gratuito</span>
-        <span class="pill">Imagens IA</span>
+    <div class="hdr">
+      <div class="hdr-eyebrow">▲ Creator Studio · Railway Deploy</div>
+      <div class="hdr-title">TikTok <em>AI</em> Generator</div>
+      <div class="hdr-sub">Pipeline Multi-Agente · Geração Autónoma · 2026</div>
+      <div class="hdr-pills">
+        <span class="pill p-red">6 Agentes IA</span>
+        <span class="pill p-grn">100% Gratuito</span>
+        <span class="pill p-pur">Imagens IA</span>
         <span class="pill">TTS Neural</span>
         <span class="pill">9:16 Vertical</span>
         <span class="pill">Legendas TikTok</span>
+        <span class="pill">Batch Queue</span>
       </div>
     </div>
     """)
 
     with gr.Tabs():
 
-        # ── TAB 1: STUDIO ──────────────────────────────────────────────────
+        # ══ STUDIO ═══════════════════════════════════════════════════════════
         with gr.Tab("STUDIO"):
             with gr.Row(equal_height=False):
 
-                # Coluna esquerda — configurações
-                with gr.Column(scale=5):
-                    gr.HTML('<div class="section-label">Tema & Conteúdo</div>')
+                # ─ Esquerda: configurações ───────────────────────────────────
+                with gr.Column(scale=4, min_width=300):
+                    gr.HTML('<div class="slabel">Conteúdo</div>')
 
                     theme_dd = gr.Dropdown(
-                        choices=theme_choices_ui,
-                        value=theme_choices_ui[1],
-                        label="Tema",
-                        container=True,
+                        choices=THEME_CHOICES, value=THEME_CHOICES[1],
+                        label="Tema", container=True
                     )
                     topic_tb = gr.Textbox(
                         label="Tópico específico",
-                        placeholder="Ex: factos sobre buracos negros  (deixa vazio para IA decidir)",
-                        lines=2,
-                        max_lines=3,
+                        placeholder="Ex: factos sobre buracos negros  (vazio = IA decide)",
+                        lines=2, max_lines=4
                     )
 
-                    gr.HTML('<div class="section-label" style="margin-top:20px">Formato</div>')
-
+                    gr.HTML('<div class="slabel" style="margin-top:18px">Formato</div>')
                     with gr.Row():
-                        duration_sl = gr.Radio(
-                            choices=dur_choices_ui,
-                            value=30,
-                            label="Duração (segundos)",
+                        dur_radio = gr.Radio(
+                            choices=DUR_CHOICES, value=30,
+                            label="Duração (s)"
                         )
                         style_dd = gr.Dropdown(
-                            choices=style_choices_ui,
-                            value="tiktok",
-                            label="Estilo legendas",
+                            choices=STYLE_CHOICES, value="tiktok",
+                            label="Legendas"
                         )
 
-                    gr.HTML('<div class="section-label" style="margin-top:20px">Voz & Idioma</div>')
-
+                    gr.HTML('<div class="slabel" style="margin-top:18px">Voz & Idioma</div>')
                     with gr.Row():
                         voice_dd = gr.Dropdown(
-                            choices=voice_choices_ui,
-                            value=voice_choices_ui[0],
-                            label="Voz",
+                            choices=VOICE_CHOICES, value=VOICE_CHOICES[0],
+                            label="Voz"
                         )
                         lang_dd = gr.Dropdown(
-                            choices=lang_choices_ui,
-                            value=lang_choices_ui[0],
-                            label="Idioma",
+                            choices=LANG_CHOICES, value=LANG_CHOICES[0],
+                            label="Idioma"
                         )
 
-                    gr.HTML('<div class="section-label" style="margin-top:20px">Áudio</div>')
-
+                    gr.HTML('<div class="slabel" style="margin-top:18px">Áudio</div>')
                     with gr.Row():
-                        music_cb = gr.Checkbox(value=True, label="Música de fundo")
-                        music_vol = gr.Slider(
-                            minimum=0.05, maximum=0.50,
-                            value=0.15, step=0.05,
-                            label="Volume da música",
-                        )
+                        music_cb  = gr.Checkbox(value=True, label="Música de fundo")
+                        music_vol = gr.Slider(0.05, 0.5, value=0.15, step=0.05, label="Volume")
 
-                    gr.HTML('<div style="margin-top:24px"></div>')
+                    gr.HTML('<div style="margin-top:22px"></div>')
                     gen_btn = gr.Button("▶  GERAR VÍDEO", variant="primary", size="lg")
 
-                # Coluna direita — output
-                with gr.Column(scale=7):
-                    gr.HTML('<div class="section-label">Preview</div>')
-                    video_out = gr.Video(
-                        label="",
-                        show_label=False,
-                        height=500,
-                    )
-                    gr.HTML('<div class="section-label" style="margin-top:16px">Resultado</div>')
-                    info_out = gr.HTML(
-                        '<div class="queue-empty">O teu vídeo aparece aqui após geração.</div>'
-                    )
+                # ─ Direita: output ──────────────────────────────────────────
+                with gr.Column(scale=6):
+                    gr.HTML('<div class="slabel">Pipeline</div>')
+                    steps_html = gr.HTML(_steps_html(0))
+
+                    gr.HTML('<div class="slabel" style="margin-top:4px">Preview</div>')
+                    video_out = gr.Video(label="", show_label=False, height=460)
+
+                    gr.HTML('<div class="slabel" style="margin-top:12px">Resultado</div>')
+                    info_html = gr.HTML('<div class="empty-state">O teu vídeo aparece aqui após geração.</div>')
 
             gen_btn.click(
-                fn=generate_single_video,
-                inputs=[theme_dd, duration_sl, voice_dd, lang_dd,
+                fn=generate_video_fn,
+                inputs=[theme_dd, dur_radio, voice_dd, lang_dd,
                         style_dd, topic_tb, music_cb, music_vol],
-                outputs=[video_out, info_out],
+                outputs=[video_out, steps_html, info_html],
                 show_progress=True,
             )
 
-        # ── TAB 2: BATCH ───────────────────────────────────────────────────
+        # ══ BATCH ════════════════════════════════════════════════════════════
         with gr.Tab("BATCH"):
-            gr.HTML('<div class="section-label">Geração em Lote</div>')
-
             with gr.Row():
-                with gr.Column(scale=5):
-                    b_theme = gr.Dropdown(choices=theme_choices_ui, value=theme_choices_ui[1], label="Tema")
+                with gr.Column(scale=4):
+                    gr.HTML('<div class="slabel">Configuração</div>')
+                    b_theme = gr.Dropdown(choices=THEME_CHOICES, value=THEME_CHOICES[1], label="Tema")
                     b_topic = gr.Textbox(label="Tópico", placeholder="Vazio = IA decide", lines=1)
-
                     with gr.Row():
-                        b_duration = gr.Radio(choices=dur_choices_ui, value=30, label="Duração")
-                        b_style = gr.Dropdown(choices=style_choices_ui, value="tiktok", label="Legendas")
-
+                        b_dur   = gr.Radio(choices=DUR_CHOICES, value=30, label="Duração")
+                        b_style = gr.Dropdown(choices=STYLE_CHOICES, value="tiktok", label="Legendas")
                     with gr.Row():
-                        b_voice = gr.Dropdown(choices=voice_choices_ui, value=voice_choices_ui[0], label="Voz")
-                        b_lang  = gr.Dropdown(choices=lang_choices_ui, value=lang_choices_ui[0], label="Idioma")
-
+                        b_voice = gr.Dropdown(choices=VOICE_CHOICES, value=VOICE_CHOICES[0], label="Voz")
+                        b_lang  = gr.Dropdown(choices=LANG_CHOICES, value=LANG_CHOICES[0], label="Idioma")
                     with gr.Row():
                         b_music = gr.Checkbox(value=True, label="Música")
                         b_vol   = gr.Slider(0.05, 0.5, value=0.15, step=0.05, label="Volume")
-
-                    b_num = gr.Slider(minimum=1, maximum=10, value=3, step=1, label="Número de vídeos")
+                    b_num     = gr.Slider(minimum=1, maximum=10, value=3, step=1, label="Número de vídeos")
                     b_add_btn = gr.Button("➕  ADICIONAR À FILA", variant="primary")
-                    b_result  = gr.HTML('<div class="queue-empty">Configura e adiciona à fila.</div>')
+                    b_result  = gr.HTML('<div class="empty-state">Configura e adiciona à fila.</div>')
 
-                with gr.Column(scale=7):
-                    gr.HTML('<div class="section-label">Estado da Fila</div>')
-                    queue_status = gr.HTML('<div class="queue-empty">Fila vazia.</div>')
-                    refresh_btn  = gr.Button("↻  ATUALIZAR", variant="secondary", size="sm")
+                with gr.Column(scale=6):
+                    gr.HTML('<div class="slabel">Estado da Fila</div>')
+                    q_status  = gr.HTML('<div class="empty-state">Fila vazia.</div>')
+                    q_refresh = gr.Button("↻  ATUALIZAR", variant="secondary", size="sm")
 
             b_add_btn.click(
-                fn=add_to_batch_queue,
-                inputs=[b_theme, b_duration, b_voice, b_lang,
-                        b_style, b_topic, b_music, b_vol, b_num],
-                outputs=[b_result],
+                fn=queue_add_fn,
+                inputs=[b_theme, b_dur, b_voice, b_lang, b_style, b_topic, b_music, b_vol, b_num],
+                outputs=[b_result]
             )
-            refresh_btn.click(fn=get_queue_status, outputs=[queue_status])
+            q_refresh.click(fn=queue_refresh_fn, outputs=[q_status])
 
-        # ── TAB 3: BIBLIOTECA ──────────────────────────────────────────────
+        # ══ BIBLIOTECA ═══════════════════════════════════════════════════════
         with gr.Tab("BIBLIOTECA"):
             with gr.Row():
-                gr.HTML('<div class="section-label">Vídeos Gerados</div>')
-                lib_refresh = gr.Button("↻  ATUALIZAR", variant="secondary", size="sm")
-            lib_out = gr.HTML('<div class="queue-empty">Clica em Atualizar para carregar.</div>')
-            lib_refresh.click(fn=list_generated_videos, outputs=[lib_out])
+                gr.HTML('<div class="slabel" style="flex:1">Vídeos Gerados</div>')
+                lib_btn = gr.Button("↻  ATUALIZAR", variant="secondary", size="sm")
+            lib_out = gr.HTML('<div class="empty-state">Clica em Atualizar.</div>')
+            lib_btn.click(fn=library_refresh_fn, outputs=[lib_out])
 
-        # ── TAB 4: SETUP ───────────────────────────────────────────────────
+        # ══ DIAGNÓSTICO ══════════════════════════════════════════════════════
+        with gr.Tab("DIAGNÓSTICO"):
+            gr.HTML('<div class="slabel">Estado do Sistema</div>')
+            gr.HTML('<p style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:16px">Usa esta página para verificar se todos os componentes estão a funcionar antes de gerar vídeos.</p>')
+            diag_btn = gr.Button("🔍  VERIFICAR SISTEMA AGORA", variant="primary")
+            diag_out = gr.HTML('<div class="empty-state">Clica em Verificar para analisar o sistema.</div>')
+            diag_btn.click(fn=run_diagnostics_fn, outputs=[diag_out])
+
+            gr.HTML('<div class="slabel" style="margin-top:28px">Logs</div>')
+            with gr.Row():
+                log_id_tb  = gr.Textbox(label="Job ID", placeholder="Ex: a1b2c3d4", scale=3)
+                log_btn    = gr.Button("📋  LER LOG", variant="secondary", scale=1)
+            log_out = gr.Textbox(
+                label="", show_label=False, lines=25,
+                interactive=False, elem_classes=["log-out"]
+            )
+            log_btn.click(fn=read_log_fn, inputs=[log_id_tb], outputs=[log_out])
+
+        # ══ SETUP ════════════════════════════════════════════════════════════
         with gr.Tab("SETUP"):
             gr.HTML("""
-            <div class="install-guide">
-
+            <div class="setup-wrap">
               <h2>Instalação Rápida</h2>
 
               <h3>1 — Requisitos</h3>
               <pre>python --version   # 3.10+
 ffmpeg -version    # obrigatório</pre>
-              <p>FFmpeg: <code>sudo apt install ffmpeg</code> · <code>brew install ffmpeg</code> · <a href="https://ffmpeg.org/download.html" style="color:#bf5af2">ffmpeg.org</a></p>
+              <p>FFmpeg: <code>sudo apt install ffmpeg</code> · <code>brew install ffmpeg</code></p>
 
-              <h3>2 — Dependências Python</h3>
+              <h3>2 — Dependências</h3>
               <pre>pip install -r requirements.txt</pre>
 
               <h3>3 — LLM (escolhe um)</h3>
-              <pre># Opção A: Ollama (100% local, recomendado)
-ollama pull llama3 && ollama serve
+              <pre># Groq — grátis, rápido (recomendado para Railway)
+# Cria conta: console.groq.com
+export GROQ_API_KEY="gsk_..."
 
-# Opção B: Groq (grátis, rápido — groq.com)
-export GROQ_API_KEY="gsk_..."</pre>
+# Ollama — 100% local
+ollama pull llama3 && ollama serve</pre>
 
               <h3>4 — Imagens</h3>
-              <p>Pollinations.ai funciona automaticamente sem configuração.</p>
-              <pre># Stable Diffusion local (opcional, melhor qualidade)
-export SD_USE_LOCAL=true
-export SD_API_URL=http://127.0.0.1:7860</pre>
+              <p>Pollinations.ai funciona automaticamente — zero configuração.</p>
 
               <h3>5 — Voz</h3>
-              <pre>pip install edge-tts   # funciona automaticamente</pre>
+              <pre>pip install edge-tts   # já incluído no requirements.txt</pre>
 
-              <h3>6 — Música de Fundo</h3>
+              <h3>6 — Railway: Variáveis de Ambiente</h3>
+              <pre>GROQ_API_KEY = gsk_...        # obrigatório para scripts de qualidade
+TTS_ENGINE   = edge-tts       # engine de voz
+SD_USE_LOCAL = false          # sem SD local no Railway</pre>
+
+              <h3>7 — Música de Fundo (Opcional)</h3>
               <p>Coloca ficheiros <code>.mp3</code> em <code>assets/music/</code></p>
-              <p>Fontes livres de direitos: <code>pixabay.com/music</code> · <code>freemusicarchive.org</code></p>
-
-              <h3>7 — Variáveis Railway</h3>
-              <pre>GROQ_API_KEY = gsk_...
-TTS_ENGINE   = edge-tts
-SD_USE_LOCAL = false</pre>
+              <p>Fontes: <code>pixabay.com/music</code> · <code>freemusicarchive.org</code></p>
 
               <h2>Roadmap</h2>
-              <div class="roadmap-item soon">
-                <div class="roadmap-dot"></div>
-                <div class="roadmap-text">Upload automático para TikTok via Creator API</div>
-              </div>
-              <div class="roadmap-item soon">
-                <div class="roadmap-dot"></div>
-                <div class="roadmap-text">Sistema de trending topics (Google Trends + Twitter)</div>
-              </div>
-              <div class="roadmap-item">
-                <div class="roadmap-dot"></div>
-                <div class="roadmap-text">Personagens consistentes com LoRA / IP-Adapter</div>
-              </div>
-              <div class="roadmap-item">
-                <div class="roadmap-dot"></div>
-                <div class="roadmap-text">Scheduler automático — publica em horas de pico</div>
-              </div>
-              <div class="roadmap-item">
-                <div class="roadmap-dot"></div>
-                <div class="roadmap-text">Dashboard analytics de performance por vídeo</div>
-              </div>
-              <div class="roadmap-item">
-                <div class="roadmap-dot"></div>
-                <div class="roadmap-text">Export multi-plataforma: Reels, Shorts, Snapchat</div>
+              <div class="rmap">
+                <div class="ritem hot"><div class="rdot"></div><div class="rtxt">Upload automático TikTok via Creator API</div></div>
+                <div class="ritem hot"><div class="rdot"></div><div class="rtxt">Trending topics em tempo real (Google Trends)</div></div>
+                <div class="ritem"><div class="rdot"></div><div class="rtxt">Personagens consistentes com LoRA / IP-Adapter</div></div>
+                <div class="ritem"><div class="rdot"></div><div class="rtxt">Scheduler — publica em horas de pico automaticamente</div></div>
+                <div class="ritem"><div class="rdot"></div><div class="rtxt">Analytics de performance por vídeo</div></div>
+                <div class="ritem"><div class="rdot"></div><div class="rtxt">Export multi-plataforma: Reels · Shorts · Snapchat</div></div>
               </div>
             </div>
             """)
 
     gr.HTML("""
-    <div style="border-top:1px solid #252535; padding:16px 24px; display:flex; justify-content:space-between; align-items:center;">
-      <span style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#444; letter-spacing:.1em; text-transform:uppercase;">TikTok Creator Studio · Open Source · 2026</span>
-      <span style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#444; letter-spacing:.1em;">100% Free · No Paid APIs Required</span>
+    <div class="ftr">
+      <span>TikTok Creator Studio · Open Source · 2026</span>
+      <span>6-Agent Pipeline · FFmpeg · edge-tts · Pollinations.ai</span>
+      <span>100% Free · No Paid APIs Required</span>
     </div>
     """)
 
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 7860))
-    logger.info(f"Iniciando na porta {port}...")
+    logger.info(f"Starting on port {port}")
     app.launch(
         server_name="0.0.0.0",
         server_port=port,

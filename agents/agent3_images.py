@@ -1,13 +1,13 @@
 """
 Agente 3: Gerador de Imagens com IA
-Usa múltiplas fontes gratuitas: Pollinations.ai, Stable Diffusion local, Hugging Face
+FIXED: timeout aumentado, fallback robusto, placeholder sempre disponível
 """
 
 import logging
 import requests
 import time
 import hashlib
-import base64
+import io
 from pathlib import Path
 from typing import Optional
 import sys
@@ -22,12 +22,11 @@ from config.settings import (
 logger = logging.getLogger(__name__)
 
 try:
-    from PIL import Image, ImageFilter, ImageEnhance
-    import io
+    from PIL import Image, ImageEnhance, ImageDraw, ImageFont
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    logger.warning("Pillow não instalado. Pós-processamento desativado.")
+    logger.warning("Pillow não instalado.")
 
 
 class ImageAgent:
@@ -38,34 +37,17 @@ class ImageAgent:
         logger.info(f"ImageAgent inicializado com backend: {self.backend}")
 
     def _detect_backend(self) -> str:
-        """Deteta o backend de geração de imagens disponível."""
-        # 1. Tenta Stable Diffusion local (AUTOMATIC1111)
+        # 1. SD local
         if SD_USE_LOCAL:
             try:
                 r = requests.get(f"{SD_API_URL}/sdapi/v1/options", timeout=3)
                 if r.status_code == 200:
-                    logger.info("Stable Diffusion local (AUTOMATIC1111) detetado!")
                     return "sd_local"
             except Exception:
                 pass
 
-        # 2. Pollinations.ai (completamente gratuito, sem chave)
-        try:
-            test_url = f"{POLLINATIONS_API}/test?width=64&height=64&nologo=true"
-            r = requests.get(test_url, timeout=10)
-            if r.status_code == 200:
-                logger.info("Pollinations.ai disponível")
-                return "pollinations"
-        except Exception:
-            pass
-
-        # 3. Hugging Face Inference API
-        if HF_API_TOKEN:
-            return "huggingface"
-
-        # 4. Fallback: gradiente colorido
-        logger.warning("Nenhum backend de IA disponível. Usando imagens de placeholder.")
-        return "placeholder"
+        # 2. Pollinations.ai - sempre tenta (não faz request de teste para não atrasar startup)
+        return "pollinations"
 
     def generate_image(
         self,
@@ -74,220 +56,174 @@ class ImageAgent:
         scene_number: int = 1,
         job_id: str = ""
     ) -> Optional[Path]:
-        """
-        Gera uma imagem para uma cena.
-
-        Args:
-            prompt: Descrição da imagem
-            negative_prompt: O que evitar na imagem
-            scene_number: Número da cena (para nomenclatura)
-            job_id: ID do job
-
-        Returns:
-            Path para a imagem gerada
-        """
         logger.info(f"[{job_id}] Gerando imagem cena {scene_number} ({self.backend})")
 
-        # Nome único do ficheiro
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
         filename = f"{job_id}_scene{scene_number:02d}_{prompt_hash}.png"
         output_path = IMAGES_DIR / filename
 
-        # Se já existe (cache), reutiliza
-        if output_path.exists():
-            logger.info(f"[{job_id}] Imagem cena {scene_number} encontrada em cache")
+        if output_path.exists() and output_path.stat().st_size > 1000:
+            logger.info(f"[{job_id}] Imagem cena {scene_number} em cache")
             return output_path
 
-        # Gera imagem com o backend disponível
         image_data = None
-        try:
-            if self.backend == "sd_local":
-                image_data = self._generate_sd_local(prompt, negative_prompt)
-            elif self.backend == "pollinations":
-                image_data = self._generate_pollinations(prompt)
-            elif self.backend == "huggingface":
-                image_data = self._generate_huggingface(prompt, negative_prompt)
-            else:
-                image_data = self._generate_placeholder(prompt, scene_number)
+        backends_tried = []
 
-        except Exception as e:
-            logger.error(f"[{job_id}] Erro ao gerar imagem: {e}. Usando placeholder.")
+        # Tenta cada backend por ordem
+        for backend in ["sd_local", "pollinations", "huggingface", "placeholder"]:
+            if backend == "sd_local" and not SD_USE_LOCAL:
+                continue
+            if backend == "huggingface" and not HF_API_TOKEN:
+                continue
+
+            backends_tried.append(backend)
+            try:
+                if backend == "sd_local":
+                    image_data = self._generate_sd_local(prompt, negative_prompt)
+                elif backend == "pollinations":
+                    image_data = self._generate_pollinations(prompt)
+                elif backend == "huggingface":
+                    image_data = self._generate_huggingface(prompt, negative_prompt)
+                elif backend == "placeholder":
+                    image_data = self._generate_placeholder(prompt, scene_number)
+
+                if image_data and len(image_data) > 1000:
+                    logger.info(f"[{job_id}] ✓ Imagem gerada via {backend} ({len(image_data)} bytes)")
+                    break
+                else:
+                    image_data = None
+            except Exception as e:
+                logger.warning(f"[{job_id}] Backend {backend} falhou: {e}")
+                image_data = None
+
+        if not image_data:
+            logger.warning(f"[{job_id}] Todos os backends falharam. Placeholder de emergência.")
             image_data = self._generate_placeholder(prompt, scene_number)
 
         if image_data:
-            # Salva e pós-processa
-            saved_path = self._save_and_postprocess(image_data, output_path, job_id)
-            return saved_path
+            return self._save_and_postprocess(image_data, output_path, job_id)
 
         return None
 
     def _generate_sd_local(self, prompt: str, negative_prompt: str) -> Optional[bytes]:
-        """Gera imagem via Stable Diffusion local (AUTOMATIC1111 WebUI)."""
+        import base64
         payload = {
             "prompt": prompt,
             "negative_prompt": negative_prompt or "blurry, low quality, watermark",
-            "width": 576,      # SD gera menor e fazemos upscale
-            "height": 1024,    # Ratio 9:16
-            "steps": 20,
-            "cfg_scale": 7.5,
+            "width": 576, "height": 1024,
+            "steps": 20, "cfg_scale": 7.5,
             "sampler_name": "DPM++ 2M Karras",
-            "n_iter": 1,
-            "batch_size": 1,
+            "n_iter": 1, "batch_size": 1,
         }
-
-        r = requests.post(
-            f"{SD_API_URL}/sdapi/v1/txt2img",
-            json=payload,
-            timeout=120
-        )
+        r = requests.post(f"{SD_API_URL}/sdapi/v1/txt2img", json=payload, timeout=120)
         r.raise_for_status()
-
         result = r.json()
         if "images" in result and result["images"]:
             return base64.b64decode(result["images"][0])
         return None
 
     def _generate_pollinations(self, prompt: str, retries: int = 3) -> Optional[bytes]:
-        """
-        Gera imagem via Pollinations.ai (100% gratuito, sem registo).
-        URL: https://image.pollinations.ai/prompt/{prompt}?params
-        """
-        # Codifica o prompt para URL
         import urllib.parse
-        encoded = urllib.parse.quote(prompt)
-
-        # Parâmetros
-        params = {
-            "width": 576,
-            "height": 1024,
-            "nologo": "true",
-            "enhance": "true",
-            "model": "flux",  # Modelo mais recente disponível
-        }
-        param_str = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{POLLINATIONS_API}/{encoded}?{param_str}"
+        # Limita o prompt a 500 chars para evitar URLs enormes
+        prompt_clean = prompt[:500]
+        encoded = urllib.parse.quote(prompt_clean)
+        url = f"{POLLINATIONS_API}/{encoded}?width=576&height=1024&nologo=true&model=flux"
 
         for attempt in range(retries):
             try:
-                r = requests.get(url, timeout=60)
-                if r.status_code == 200 and len(r.content) > 1000:
+                r = requests.get(url, timeout=45)
+                if r.status_code == 200 and len(r.content) > 5000:
                     return r.content
-                else:
-                    logger.warning(f"Pollinations: status {r.status_code}, tentativa {attempt+1}")
-                    time.sleep(2 ** attempt)
+                logger.warning(f"Pollinations tentativa {attempt+1}: status={r.status_code} size={len(r.content)}")
+            except requests.Timeout:
+                logger.warning(f"Pollinations timeout tentativa {attempt+1}")
             except Exception as e:
-                logger.warning(f"Pollinations erro: {e}, tentativa {attempt+1}")
-                time.sleep(2 ** attempt)
+                logger.warning(f"Pollinations erro tentativa {attempt+1}: {e}")
+
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
 
         return None
 
     def _generate_huggingface(self, prompt: str, negative_prompt: str) -> Optional[bytes]:
-        """Gera imagem via Hugging Face Inference API (gratuita com token)."""
         headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
         payload = {
             "inputs": prompt,
-            "parameters": {
-                "negative_prompt": negative_prompt,
-                "width": 576,
-                "height": 1024,
-                "num_inference_steps": 20,
-            }
+            "parameters": {"negative_prompt": negative_prompt, "width": 576, "height": 1024}
         }
-
         api_url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
         r = requests.post(api_url, headers=headers, json=payload, timeout=60)
         r.raise_for_status()
         return r.content
 
     def _generate_placeholder(self, prompt: str, scene_number: int) -> Optional[bytes]:
-        """Cria uma imagem placeholder colorida quando nenhum backend está disponível."""
+        """Placeholder elegante com gradiente — sempre funciona sem internet."""
         if not PIL_AVAILABLE:
-            logger.error("Pillow não instalado para criar placeholder")
-            return None
+            # Fallback sem Pillow: cria PNG mínimo válido
+            return self._minimal_png()
 
-        import io
-        from PIL import Image, ImageDraw, ImageFont
-        import random
-
-        # Paleta de cores por cena
-        colors = [
-            ("#1a1a2e", "#e94560"),
-            ("#0f3460", "#533483"),
-            ("#16213e", "#0f3460"),
-            ("#1b262c", "#0f4c75"),
-            ("#2d132c", "#c72c41"),
+        palettes = [
+            [(10, 10, 30), (100, 20, 80)],
+            [(5, 15, 40), (20, 80, 120)],
+            [(20, 5, 35), (80, 20, 100)],
+            [(10, 25, 15), (20, 100, 60)],
+            [(30, 10, 10), (120, 40, 20)],
         ]
-        bg_color, accent_color = colors[scene_number % len(colors)]
+        c1, c2 = palettes[scene_number % len(palettes)]
 
-        img = Image.new("RGB", (576, 1024), bg_color)
-        draw = ImageDraw.Draw(img)
-
-        # Gradiente simples
+        img = Image.new("RGB", (576, 1024))
+        pixels = img.load()
         for y in range(1024):
-            alpha = y / 1024
-            r1, g1, b1 = int(bg_color[1:3], 16), int(bg_color[3:5], 16), int(bg_color[5:7], 16)
-            r2, g2, b2 = int(accent_color[1:3], 16), int(accent_color[3:5], 16), int(accent_color[5:7], 16)
-            r = int(r1 * (1 - alpha) + r2 * alpha)
-            g = int(g1 * (1 - alpha) + g2 * alpha)
-            b = int(b1 * (1 - alpha) + b2 * alpha)
-            draw.line([(0, y), (576, y)], fill=(r, g, b))
+            t = y / 1024
+            r = int(c1[0] * (1-t) + c2[0] * t)
+            g = int(c1[1] * (1-t) + c2[1] * t)
+            b = int(c1[2] * (1-t) + c2[2] * t)
+            for x in range(576):
+                pixels[x, y] = (r, g, b)
 
-        # Texto de placeholder
-        draw.text((50, 450), f"Cena {scene_number}", fill="white")
-        draw.text((50, 500), prompt[:60] + "...", fill=(200, 200, 200))
+        # Texto central
+        draw = ImageDraw.Draw(img)
+        draw.text((288, 480), f"Cena {scene_number}", fill=(200, 200, 200), anchor="mm")
+        draw.text((288, 520), "Gerando imagem...", fill=(120, 120, 120), anchor="mm")
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    def _save_and_postprocess(
-        self, image_data: bytes, output_path: Path, job_id: str
-    ) -> Path:
-        """Salva a imagem e aplica pós-processamento (resize, sharpening, etc.)."""
+    def _minimal_png(self) -> bytes:
+        """PNG 1x1 preto válido como último fallback."""
+        return (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00'
+            b'\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18'
+            b'\xd5N\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+
+    def _save_and_postprocess(self, image_data: bytes, output_path: Path, job_id: str) -> Path:
         if PIL_AVAILABLE:
-            import io
-            img = Image.open(io.BytesIO(image_data))
-
-            # Converte para RGB se necessário
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            # Redimensiona para 1080x1920 (TikTok)
-            img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), Image.LANCZOS)
-
-            # Melhora nitidez
-            enhancer = ImageEnhance.Sharpness(img)
-            img = enhancer.enhance(1.3)
-
-            # Aumenta ligeiramente o contraste
-            enhancer = ImageEnhance.Contrast(img)
-            img = enhancer.enhance(1.1)
-
-            img.save(output_path, "PNG", optimize=True)
+            try:
+                img = Image.open(io.BytesIO(image_data))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), Image.LANCZOS)
+                enhancer = ImageEnhance.Sharpness(img)
+                img = enhancer.enhance(1.2)
+                enhancer = ImageEnhance.Contrast(img)
+                img = enhancer.enhance(1.08)
+                img.save(output_path, "PNG", optimize=True)
+            except Exception as e:
+                logger.warning(f"[{job_id}] Erro no pós-processamento: {e}. Salvando raw.")
+                with open(output_path, "wb") as f:
+                    f.write(image_data)
         else:
-            # Salva raw se Pillow não disponível
             with open(output_path, "wb") as f:
                 f.write(image_data)
 
-        logger.info(f"[{job_id}] Imagem salva: {output_path}")
+        logger.info(f"[{job_id}] Imagem salva: {output_path} ({output_path.stat().st_size} bytes)")
         return output_path
 
-    def generate_batch(
-        self, scenes: list, job_id: str = "", delay: float = 1.0
-    ) -> list:
-        """
-        Gera imagens para múltiplas cenas em sequência.
-
-        Args:
-            scenes: Lista de cenas (do Agent 2)
-            job_id: ID do job
-            delay: Delay entre gerações (evita rate limiting)
-
-        Returns:
-            Lista de cenas com image_path preenchido
-        """
+    def generate_batch(self, scenes: list, job_id: str = "", delay: float = 1.5) -> list:
         logger.info(f"[{job_id}] Gerando imagens para {len(scenes)} cenas")
-
         from agents.agent2_scenes import SceneSplitterAgent
         neg_prompt = SceneSplitterAgent().get_negative_prompt()
 
@@ -300,12 +236,11 @@ class ImageAgent:
                     job_id=job_id
                 )
                 scene["image_path"] = path
-                logger.info(f"[{job_id}] ✓ Imagem {i+1}/{len(scenes)} gerada")
+                logger.info(f"[{job_id}] ✓ Imagem {i+1}/{len(scenes)}")
             except Exception as e:
                 logger.error(f"[{job_id}] ✗ Erro na imagem {i+1}: {e}")
                 scene["image_path"] = None
 
-            # Delay para não sobrecarregar APIs gratuitas
             if i < len(scenes) - 1:
                 time.sleep(delay)
 

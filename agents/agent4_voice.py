@@ -1,12 +1,14 @@
 """
 Agente 4: Gerador de Voz (TTS)
 Suporta: edge-tts (gratuito online), Piper (offline), Coqui TTS, gTTS
+FIXED: asyncio event loop compatibility com Gradio/Railway
 """
 
 import logging
-import asyncio
 import subprocess
 import os
+import tempfile
+import shutil
 from pathlib import Path
 from typing import Optional
 import sys
@@ -27,63 +29,49 @@ class VoiceAgent:
         logger.info(f"VoiceAgent inicializado com engine: {self.engine}")
 
     def _detect_engine(self) -> str:
-        """Deteta o engine TTS disponível."""
         preferred = TTS_ENGINE
-
-        if preferred == "edge-tts" or preferred == "auto":
+        if preferred in ("edge-tts", "auto"):
             try:
                 import edge_tts
                 return "edge-tts"
             except ImportError:
                 pass
-
-        if preferred == "piper" or preferred == "auto":
-            if self._check_piper():
-                return "piper"
-
-        if preferred == "coqui" or preferred == "auto":
-            try:
-                import TTS
-                return "coqui"
-            except ImportError:
-                pass
-
-        if preferred == "gtts" or preferred == "auto":
+        if preferred in ("gtts", "auto"):
             try:
                 import gtts
                 return "gtts"
             except ImportError:
                 pass
-
+        if preferred in ("piper", "auto"):
+            if self._check_piper():
+                return "piper"
+        if preferred in ("coqui", "auto"):
+            try:
+                import TTS
+                return "coqui"
+            except ImportError:
+                pass
         logger.warning("Nenhum engine TTS encontrado! Instala: pip install edge-tts")
         return "silent"
 
     def _check_piper(self) -> bool:
-        """Verifica se Piper TTS está instalado."""
         try:
-            result = subprocess.run(
-                ["piper", "--help"],
-                capture_output=True, timeout=5
-            )
+            result = subprocess.run(["piper", "--help"], capture_output=True, timeout=5)
             return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except Exception:
             return False
 
     def _get_voice_key(self, voice_type: str, language: str) -> str:
-        """Retorna a chave de voz correta para o engine."""
         lang = language.lower()
         vtype = voice_type.lower()
-
-        # Mapeia para chave de voz
-        if "femini" in vtype or vtype == "female":
+        if "femini" in vtype or vtype == "female" or "pt_female" in vtype or "en_female" in vtype:
             key = f"{lang}_female"
-        elif "masculi" in vtype or vtype == "male":
+        elif "masculi" in vtype or vtype == "male" or "pt_male" in vtype or "en_male" in vtype:
             key = f"{lang}_male"
         elif "robot" in vtype:
             key = "robotic"
         else:
-            key = f"{lang}_female"  # default
-
+            key = f"{lang}_female"
         return key
 
     def generate_audio(
@@ -95,26 +83,12 @@ class VoiceAgent:
         job_id: str = "",
         speed: float = 1.0
     ) -> Optional[Path]:
-        """
-        Gera áudio de narração para uma cena.
-
-        Args:
-            text: Texto a narrar
-            voice_type: Tipo de voz (masculina, feminina, robótica)
-            language: Idioma (pt, en, es, fr)
-            scene_number: Número da cena
-            job_id: ID do job
-            speed: Velocidade da fala (0.8-1.3)
-
-        Returns:
-            Path para o ficheiro de áudio gerado
-        """
         logger.info(f"[{job_id}] Gerando áudio cena {scene_number} ({self.engine})")
 
         filename = f"{job_id}_scene{scene_number:02d}_audio.mp3"
         output_path = AUDIO_DIR / filename
 
-        if output_path.exists():
+        if output_path.exists() and output_path.stat().st_size > 100:
             logger.info(f"[{job_id}] Áudio cena {scene_number} em cache")
             return output_path
 
@@ -129,67 +103,63 @@ class VoiceAgent:
             elif self.engine == "gtts":
                 success = self._generate_gtts(text, language, output_path, speed)
             else:
-                success = self._generate_silent(scene_number, output_path)
-
+                success = self._generate_silent(5, output_path)
         except Exception as e:
-            logger.error(f"[{job_id}] Erro ao gerar áudio: {e}")
-            # Cria áudio silencioso como fallback
-            success = self._generate_silent(5, output_path)
+            logger.error(f"[{job_id}] Engine {self.engine} falhou: {e}. Tentando gtts...")
+            try:
+                success = self._generate_gtts(text, language, output_path, speed)
+            except Exception as e2:
+                logger.error(f"[{job_id}] gtts também falhou: {e2}. Usando silêncio.")
+                success = self._generate_silent(5, output_path)
 
-        if success and output_path.exists():
+        if success and output_path.exists() and output_path.stat().st_size > 100:
             logger.info(f"[{job_id}] ✓ Áudio gerado: {output_path}")
             return output_path
 
-        return None
+        logger.warning(f"[{job_id}] Áudio falhou, usando silêncio")
+        self._generate_silent(5, output_path)
+        return output_path if output_path.exists() else None
 
     def _generate_edge_tts(
         self, text: str, voice_type: str, language: str,
         output_path: Path, speed: float
     ) -> bool:
         """
-        Gera voz usando edge-tts (Microsoft Edge TTS, completamente gratuito).
-        pip install edge-tts
+        edge-tts via subprocess para evitar conflito de event loop com Gradio.
         """
-        import edge_tts
-
         voice_key = self._get_voice_key(voice_type, language)
-        voice_name = EDGE_TTS_VOICES.get(voice_key, EDGE_TTS_VOICES.get("pt_female"))
+        voice_name = EDGE_TTS_VOICES.get(voice_key, EDGE_TTS_VOICES.get("pt_female", "pt-PT-RaquelNeural"))
 
-        # Configura velocidade com SSML
         rate_percent = int((speed - 1.0) * 100)
         rate_str = f"+{rate_percent}%" if rate_percent >= 0 else f"{rate_percent}%"
 
-        # Efeito robótico via SSML (se solicitado)
-        if "robot" in voice_type.lower():
-            # Edge-tts com pitch alterado soa robótico
-            ssml_text = f"""<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{language}">
-                <voice name="{voice_name}">
-                    <prosody rate="{rate_str}" pitch="-20Hz">{text}</prosody>
-                </voice>
-            </speak>"""
-            communicate = edge_tts.Communicate(ssml_text, voice_name)
-        else:
-            communicate = edge_tts.Communicate(
-                text, voice_name, rate=rate_str
-            )
+        # Usa subprocess para evitar asyncio.run() dentro do event loop do Gradio
+        cmd = [
+            sys.executable, "-c",
+            f"""
+import asyncio
+import edge_tts
 
-        # Executa async de forma síncrona
-        async def _run():
-            await communicate.save(str(output_path))
+async def run():
+    communicate = edge_tts.Communicate({repr(text)}, {repr(voice_name)}, rate={repr(rate_str)})
+    await communicate.save({repr(str(output_path))})
 
-        asyncio.run(_run())
-        return output_path.exists()
+asyncio.run(run())
+"""
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=60, text=True)
+
+        if result.returncode != 0:
+            logger.warning(f"edge-tts subprocess erro: {result.stderr[:300]}")
+            return False
+
+        return output_path.exists() and output_path.stat().st_size > 100
 
     def _generate_piper(
         self, text: str, voice_type: str, language: str,
         output_path: Path, speed: float
     ) -> bool:
-        """
-        Gera voz usando Piper TTS (offline, rápido e leve).
-        Instalação: pip install piper-tts
-        Modelos: https://huggingface.co/rhasspy/piper-voices
-        """
-        # Mapeamento de modelos Piper por idioma
         piper_models = {
             "pt": "pt_PT-tugao-medium",
             "en": "en_US-lessac-medium",
@@ -203,46 +173,25 @@ class VoiceAgent:
             logger.warning(f"Modelo Piper não encontrado: {model_path}")
             return False
 
-        # Ficheiro WAV temporário
         wav_path = output_path.with_suffix(".wav")
-
         cmd = [
-            "piper",
-            "--model", str(model_path),
+            "piper", "--model", str(model_path),
             "--output_file", str(wav_path),
             "--length_scale", str(1.0 / speed)
         ]
-
-        result = subprocess.run(
-            cmd,
-            input=text.encode(),
-            capture_output=True,
-            timeout=30
-        )
-
+        result = subprocess.run(cmd, input=text.encode(), capture_output=True, timeout=30)
         if result.returncode != 0:
-            logger.error(f"Piper erro: {result.stderr.decode()}")
             return False
 
-        # Converte WAV para MP3 via FFmpeg
         subprocess.run([
             "ffmpeg", "-y", "-i", str(wav_path),
-            "-codec:a", "libmp3lame", "-qscale:a", "2",
-            str(output_path)
+            "-codec:a", "libmp3lame", "-qscale:a", "2", str(output_path)
         ], capture_output=True)
-
         wav_path.unlink(missing_ok=True)
         return output_path.exists()
 
-    def _generate_coqui(
-        self, text: str, language: str, output_path: Path, speed: float
-    ) -> bool:
-        """
-        Gera voz usando Coqui TTS (open source, local).
-        pip install TTS
-        """
+    def _generate_coqui(self, text: str, language: str, output_path: Path, speed: float) -> bool:
         from TTS.api import TTS
-
         lang_models = {
             "pt": "tts_models/pt/cv/vits",
             "en": "tts_models/en/ljspeech/tacotron2-DDC",
@@ -250,74 +199,46 @@ class VoiceAgent:
             "fr": "tts_models/fr/css10/vits",
         }
         model = lang_models.get(language, COQUI_MODEL)
-
         tts = TTS(model_name=model, progress_bar=False, gpu=False)
         wav_path = output_path.with_suffix(".wav")
         tts.tts_to_file(text=text, file_path=str(wav_path))
-
-        # Converte para MP3
         subprocess.run([
             "ffmpeg", "-y", "-i", str(wav_path),
-            "-codec:a", "libmp3lame", "-qscale:a", "2",
-            str(output_path)
+            "-codec:a", "libmp3lame", "-qscale:a", "2", str(output_path)
         ], capture_output=True)
-
         wav_path.unlink(missing_ok=True)
         return output_path.exists()
 
-    def _generate_gtts(
-        self, text: str, language: str, output_path: Path, speed: float
-    ) -> bool:
-        """
-        Gera voz usando Google Text-to-Speech (gratuito, online).
-        pip install gtts
-        """
+    def _generate_gtts(self, text: str, language: str, output_path: Path, speed: float) -> bool:
         from gtts import gTTS
-        import tempfile
-
-        tts = gTTS(text=text, lang=language, slow=(speed < 0.9))
+        lang_map = {"pt": "pt", "en": "en", "es": "es", "fr": "fr"}
+        lang = lang_map.get(language, "pt")
+        tts = gTTS(text=text, lang=lang, slow=False)
         tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp.close()
         tts.save(tmp.name)
-
-        # Ajusta velocidade com FFmpeg se necessário
-        if speed != 1.0:
-            subprocess.run([
-                "ffmpeg", "-y", "-i", tmp.name,
-                "-filter:a", f"atempo={speed}",
-                str(output_path)
-            ], capture_output=True)
-            os.unlink(tmp.name)
-        else:
-            import shutil
-            shutil.move(tmp.name, str(output_path))
-
+        shutil.move(tmp.name, str(output_path))
         return output_path.exists()
 
     def _generate_silent(self, duration: int, output_path: Path) -> bool:
-        """Cria áudio silencioso como último fallback."""
         cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
+            "ffmpeg", "-y", "-f", "lavfi",
             "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100",
             "-t", str(duration),
             "-codec:a", "libmp3lame",
             str(output_path)
         ]
-        result = subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
         return result.returncode == 0
 
     def get_audio_duration(self, audio_path: Path) -> float:
-        """Obtém a duração real de um ficheiro de áudio."""
         try:
+            import json as _json
             result = subprocess.run([
-                "ffprobe", "-v", "quiet",
-                "-print_format", "json",
-                "-show_format",
-                str(audio_path)
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", str(audio_path)
             ], capture_output=True, text=True, timeout=10)
-
-            import json
-            data = json.loads(result.stdout)
+            data = _json.loads(result.stdout)
             return float(data["format"]["duration"])
         except Exception:
             return 0.0
@@ -326,9 +247,7 @@ class VoiceAgent:
         self, scenes: list, voice_type: str, language: str,
         job_id: str = "", speed: float = 1.0
     ) -> list:
-        """Gera áudio para todas as cenas."""
         logger.info(f"[{job_id}] Gerando áudio para {len(scenes)} cenas")
-
         for i, scene in enumerate(scenes):
             path = self.generate_audio(
                 text=scene["texto"],
@@ -339,15 +258,10 @@ class VoiceAgent:
                 speed=speed
             )
             scene["audio_path"] = path
-
-            # Obtém duração real do áudio e atualiza cena
             if path:
                 real_duration = self.get_audio_duration(path)
                 if real_duration > 0:
-                    # Adiciona margem para a imagem durar um pouco mais que o áudio
                     scene["duracao_real"] = real_duration + 0.5
                     logger.info(f"[{job_id}] Cena {i+1}: áudio {real_duration:.1f}s")
-
             logger.info(f"[{job_id}] ✓ Áudio {i+1}/{len(scenes)}")
-
         return scenes
