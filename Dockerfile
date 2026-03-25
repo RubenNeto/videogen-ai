@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Instala FFmpeg e dependências de sistema
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsm6 \
@@ -17,10 +16,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# CRÍTICO: apaga a pasta 'queue' que conflitua com o módulo Python
-RUN rm -rf /app/queue
+# REMOVE a pasta 'queue' ANTES de qualquer import Python
+# Ela conflitua com o módulo nativo 'queue' do Python
+RUN rm -rf /app/queue && \
+    rm -rf /app/queue/__init__.py && \
+    echo "Queue folder removed"
 
-# Cria diretórios necessários
+# Verifica que foi removida
+RUN python -c "import queue; from queue import Queue; print('queue module OK')"
+
 RUN mkdir -p output/videos output/images output/audio output/logs \
     assets/music assets/fonts templates job_queue
 
