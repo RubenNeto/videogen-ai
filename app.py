@@ -485,10 +485,12 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    logger.info("Iniciando TikTok Video Generator...")
+    import os
+    port = int(os.environ.get("PORT", 7860))
+    logger.info(f"Iniciando TikTok Video Generator na porta {port}...")
     app.launch(
         server_name="0.0.0.0",
-        server_port=7860,
+        server_port=port,
         share=False,
         show_api=False,
         favicon_path=None,
