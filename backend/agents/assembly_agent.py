@@ -39,17 +39,15 @@ class VideoAssemblyAgent:
             audio_dur = await self._audio_duration(audio_path)
             logger.info(f"[{job_id}] Audio duration: {audio_dur:.1f}s (target: {target_dur:.1f}s)")
 
-            # 2 — Trim only if audio is longer than target
-            if target_dur > 5 and audio_dur > target_dur * 1.05:
-                trimmed = os.path.join(work_dir, "audio_cut.mp3")
-                await self._trim_audio(audio_path, trimmed, target_dur)
-                audio_path = trimmed
+            # 2 — Match audio to target duration
+            if target_dur > 5:
+                adjusted = os.path.join(work_dir, "audio_adj.mp3")
+                await self._adjust_audio(audio_path, adjusted, audio_dur, target_dur)
+                audio_path = adjusted
                 final_dur  = target_dur
-                logger.info(f"[{job_id}] Trimmed to {target_dur:.1f}s")
+                logger.info(f"[{job_id}] Audio adjusted {audio_dur:.1f}s -> {target_dur:.1f}s")
             else:
-                # Use real audio duration — don't fake it
                 final_dur = audio_dur
-                logger.info(f"[{job_id}] Using real duration: {final_dur:.1f}s")
 
             # 3 — Scale images (simple, fast, no zoom effects)
             scaled = await self._scale_images(image_paths, work_dir)
@@ -199,6 +197,39 @@ class VideoAssemblyAgent:
         s  = int(sec % 60)
         cs = int((sec % 1) * 100)
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    async def _adjust_audio(self, src: str, dst: str, actual_dur: float, target_dur: float):
+        """
+        Adjust audio to match target duration:
+        - If audio is longer: trim it
+        - If audio is shorter: loop it to fill the target duration
+        """
+        if actual_dur > target_dur * 1.02:
+            # Trim
+            await self._trim_audio(src, dst, target_dur)
+        elif actual_dur < target_dur * 0.9:
+            # Loop: repeat audio to fill target duration
+            # Use FFmpeg aloop filter
+            loops = int(target_dur / actual_dur) + 1
+            cmd = [
+                "ffmpeg", "-y", "-i", src,
+                "-filter_complex", f"aloop=loop={loops}:size=2e+09,atrim=duration={target_dur}",
+                "-q:a", "2", dst
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(f"Audio loop failed: {err.decode()[-200:]}, using original")
+                import shutil
+                shutil.copy(src, dst)
+        else:
+            # Close enough, just copy
+            import shutil
+            shutil.copy(src, dst)
 
     async def _trim_audio(self, src, dst, dur):
         await self._run(["ffmpeg", "-y", "-i", src, "-t", str(dur), "-c", "copy", dst])

@@ -1306,7 +1306,7 @@ body::before{
             </div>
             <div id="voicePickerGrid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px"></div>
             <div class="api-note">
-              💡 All voices use gTTS (free). For higher quality add <a href="https://elevenlabs.io" target="_blank">ElevenLabs</a> key to <strong>.env</strong>
+              💡 Uses Microsoft Neural TTS (edge-tts) — 100% free, no API key. Male voices: James, Mike, Liam. Female: Sarah, Emma, Natasha.
             </div>
           </div>
 
@@ -2000,7 +2000,7 @@ async function simulatePipeline(jobId, niche, count) {
     ['STRATEGY', `Generated ${count} differentiated video strategies`],
     ['SCRIPT',   `Scripts written — hooks <3s, avg 85 words`],
     ['IMAGES',   S.imgSrc === 'pexels' ? `Fetched real photos from Pexels (${niche})` : 'Generated images with DALL·E 3'],
-    ['VOICE',    'Voiceover synthesised — ElevenLabs US English'],
+    ['VOICE',    'Voiceover synthesised — Microsoft Neural TTS (free)'],
     ['ASSEMBLY', `${count} videos assembled — 9:16, subtitles burned`],
     ['SEO',      'Captions and hashtags optimised'],
   ];
