@@ -1,7 +1,9 @@
 """
 Agent 4: Visual Agent
-Pollinations.ai — grátis, sem chave, AI images.
-Usa prompts curtos para melhor resultado e menor timeout.
+- Pollinations.ai — grátis, sem chave
+- Prompts curtos e diretos (melhor qualidade, mais rápido)
+- Timeout 120s com 2 tentativas
+- Fallback: cor sólida (nunca deixa o vídeo sem imagens)
 """
 import asyncio
 import logging
@@ -21,14 +23,23 @@ class VisualAgent:
         prompts = script.get("image_prompts", [])
         niche   = script.get("niche", "cinematic scene")
 
+        # Ensure we have exactly 4 prompts
         if not prompts:
-            prompts = [{"prompt": niche} for _ in range(4)]
+            prompts = [
+                {"prompt": f"{niche} dramatic close-up"},
+                {"prompt": f"{niche} wide cinematic shot"},
+                {"prompt": f"{niche} action moment"},
+                {"prompt": f"{niche} epic final scene"},
+            ]
+        elif len(prompts) < 4:
+            while len(prompts) < 4:
+                prompts.append({"prompt": f"{niche} cinematic scene"})
 
-        logger.info(f"[{job_id}] {len(prompts)} images via '{image_source}'")
+        logger.info(f"[{job_id}] Generating {len(prompts)} images | source={image_source}")
 
         results = []
-        for idx, ip in enumerate(prompts):
-            path = await self._get_one(ip, idx, job_id, image_source, niche)
+        for idx, ip in enumerate(prompts[:4]):  # max 4 images
+            path = await self._get_image(ip, idx, job_id, image_source, niche)
             results.append(path)
 
         valid = [r for r in results if r and os.path.exists(r)]
@@ -38,111 +49,110 @@ class VisualAgent:
         logger.info(f"[{job_id}] {len(valid)}/{len(prompts)} images OK")
         return valid
 
-    async def _get_one(self, ip: dict, idx: int, job_id: str, source: str, niche: str) -> str:
+    async def _get_image(self, ip: dict, idx: int, job_id: str, source: str, niche: str) -> str:
         out_dir = os.path.join(settings.TEMP_DIR, job_id)
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"img_{idx:02d}_{uuid.uuid4().hex[:6]}.jpg")
 
-        # Build short prompt (max 80 chars) — Pollinations works much better
+        # Clean short prompt
         raw_prompt = ip.get("prompt", ip.get("search_query", niche))
-        short_prompt = self._shorten(raw_prompt, niche)
+        prompt     = self._clean_prompt(raw_prompt, niche)
 
+        # Route by source
         if source == "pexels" and settings.has_pexels:
-            try:
-                p = await self._pexels(ip.get("search_query", niche), out_path, idx)
-                if p:
-                    logger.info(f"[{job_id}] img_{idx}: Pexels ✓")
-                    return p
-            except Exception as e:
-                logger.warning(f"[{job_id}] img_{idx} Pexels: {e}")
+            p = await self._pexels(ip.get("search_query", niche), out_path, idx)
+            if p:
+                return p
+            # fallthrough to Pollinations
 
         elif source == "dalle" and settings.OPENAI_API_KEY:
             try:
-                p = await self._dalle(short_prompt, out_path.replace(".jpg", ".png"))
-                logger.info(f"[{job_id}] img_{idx}: DALL·E ✓")
-                return p
+                return await self._dalle(prompt, out_path.replace(".jpg", ".png"))
             except Exception as e:
                 logger.warning(f"[{job_id}] img_{idx} DALL·E: {e}")
 
-        elif source == "mixed":
-            if idx == 0 and settings.has_pexels:
-                try:
-                    p = await self._pexels(ip.get("search_query", niche), out_path, idx)
-                    if p:
-                        return p
-                except Exception:
-                    pass
-
         # Pollinations (default + fallback)
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                p = await self._pollinations(short_prompt, out_path, seed=idx * 13 + attempt)
-                logger.info(f"[{job_id}] img_{idx}: Pollinations ✓ (attempt {attempt+1})")
+                p = await self._pollinations(prompt, out_path, seed=idx * 17 + attempt)
+                logger.info(f"[{job_id}] img_{idx}: Pollinations ✓ '{prompt[:40]}'")
                 return p
             except Exception as e:
-                logger.warning(f"[{job_id}] img_{idx} Pollinations #{attempt+1}: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(5)
+                logger.warning(f"[{job_id}] img_{idx} attempt {attempt+1}: {e}")
+                if attempt == 0:
+                    await asyncio.sleep(3)
 
-        # Absolute last resort
-        return await self._solid_color(out_path, idx)
+        # Solid color fallback — ALWAYS produces a result
+        logger.warning(f"[{job_id}] img_{idx}: using color fallback")
+        return await self._color_fallback(out_path, idx)
 
-    def _shorten(self, prompt: str, niche: str) -> str:
-        """Extract a clean short prompt for Pollinations (max ~80 chars)."""
-        # Remove style instructions already added globally
-        clean = re.sub(r'(no text|no watermark|no logo|cinematic lighting|ultra sharp'
-                       r'|vertical portrait|9:16|professional quality|vivid colors)', 
-                       '', prompt, flags=re.IGNORECASE)
-        clean = re.sub(r'\s+', ' ', clean).strip().rstrip(',.')
-        # Keep first 80 chars
-        if len(clean) > 80:
-            clean = clean[:77] + "..."
-        return clean if clean else niche
+    def _clean_prompt(self, prompt: str, niche: str) -> str:
+        """Keep prompt short and clean for Pollinations."""
+        # Remove style words we'll add ourselves
+        clean = re.sub(
+            r'(no text|no watermark|no logo|vertical|9:16|portrait|'
+            r'ultra sharp|professional|high quality|photorealistic)',
+            '', prompt, flags=re.IGNORECASE
+        )
+        clean = re.sub(r'\s+', ' ', clean).strip().strip(',.')
+        # Truncate to 60 chars max
+        if len(clean) > 60:
+            clean = clean[:57] + "..."
+        return clean or niche
 
     async def _pollinations(self, prompt: str, out_path: str, seed: int = 0) -> str:
-        # Style appended separately — short and effective
-        full = f"{prompt}, cinematic, sharp, vivid"
+        """
+        Pollinations.ai — completely free, no API key.
+        Uses flux model which is fastest and best quality.
+        """
+        full    = f"{prompt}, cinematic dramatic lighting, sharp"
         encoded = urllib.parse.quote(full)
-        url = (
+        url     = (
             f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?width=576&height=1024&seed={seed}&nologo=true&model=flux"
+            f"?width=576&height=1024&seed={seed}&nologo=true&model=flux&enhance=false"
         )
-        logger.debug(f"Pollinations URL: {url[:100]}...")
+        logger.debug(f"Pollinations: {url[:80]}...")
 
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as http:
             resp = await http.get(url)
             resp.raise_for_status()
+
             ct = resp.headers.get("content-type", "")
             if "image" not in ct:
-                raise RuntimeError(f"Not image ({ct[:30]})")
-            if len(resp.content) < 3000:
-                raise RuntimeError(f"Too small: {len(resp.content)}B")
+                raise RuntimeError(f"Not an image: {ct[:40]}")
+            if len(resp.content) < 5000:
+                raise RuntimeError(f"Image too small: {len(resp.content)}B")
+
             with open(out_path, "wb") as f:
                 f.write(resp.content)
+
         return out_path
 
-    async def _pexels(self, query: str, out_path: str, idx: int) -> str | None:
-        async with httpx.AsyncClient(timeout=20) as http:
-            r = await http.get(
-                "https://api.pexels.com/v1/search",
-                headers={"Authorization": settings.PEXELS_API_KEY},
-                params={"query": query, "per_page": 10, "orientation": "portrait"},
-            )
-            r.raise_for_status()
-            photos = r.json().get("photos", [])
-            if not photos:
-                return None
-            img_url = photos[idx % len(photos)]["src"]["large"]
-            img = await http.get(img_url, timeout=30)
-            img.raise_for_status()
-            with open(out_path, "wb") as f:
-                f.write(img.content)
-        return out_path
+    async def _pexels(self, query: str, out_path: str, idx: int):
+        try:
+            async with httpx.AsyncClient(timeout=20) as http:
+                r = await http.get(
+                    "https://api.pexels.com/v1/search",
+                    headers={"Authorization": settings.PEXELS_API_KEY},
+                    params={"query": query, "per_page": 8, "orientation": "portrait"},
+                )
+                r.raise_for_status()
+                photos = r.json().get("photos", [])
+                if not photos:
+                    return None
+                url = photos[idx % len(photos)]["src"]["large"]
+                img = await http.get(url, timeout=30)
+                with open(out_path, "wb") as f:
+                    f.write(img.content)
+            return out_path
+        except Exception as e:
+            logger.warning(f"Pexels: {e}")
+            return None
 
     async def _dalle(self, prompt: str, out_path: str) -> str:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        resp = await client.images.generate(
+        resp   = await client.images.generate(
             model="dall-e-3", prompt=prompt[:4000],
             size="1024x1792", quality="standard", n=1,
         )
@@ -152,15 +162,21 @@ class VisualAgent:
                 f.write(r.content)
         return out_path
 
-    async def _solid_color(self, out_path: str, idx: int) -> str:
-        colors = ["1a1a2e", "16213e", "0f3460", "533483", "2d132c"]
-        c = colors[idx % len(colors)]
-        png = out_path.replace(".jpg", ".png")
-        cmd = ["ffmpeg", "-y", "-f", "lavfi",
-               "-i", f"color=c=#{c}:size=576x1024:rate=1",
-               "-frames:v", "1", png]
+    async def _color_fallback(self, out_path: str, idx: int) -> str:
+        """Dark gradient fallback — always works."""
+        # Use different dark gradient per image for variety
+        gradients = [
+            "color=c=#0f0c29:size=576x1024",
+            "color=c=#1a1a2e:size=576x1024",
+            "color=c=#16213e:size=576x1024",
+            "color=c=#0f3460:size=576x1024",
+        ]
+        grad = gradients[idx % len(gradients)]
+        png  = out_path.replace(".jpg", ".png")
+        cmd  = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"{grad}:rate=1",
+                "-frames:v", "1", png]
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
         await proc.communicate()
-        logger.warning(f"img_{idx}: solid color fallback")
         return png

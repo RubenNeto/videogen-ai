@@ -1,32 +1,32 @@
 """
-Agent 5: Voiceover Agent
-- Primary: edge-tts (Microsoft Neural TTS — grátis, sem chave, vozes genuinamente masculinas/femininas)
-- Fallback: gTTS (Google TTS)
-- Velocidade +15% via FFmpeg
+Agent 5: Voiceover
+- Primary: edge-tts (Microsoft Neural — grátis, genuinamente masculino/feminino)
+- Fallback: gTTS
+- Speed +15% via FFmpeg
 """
 import asyncio
 import logging
 import os
+import shutil
 import uuid
 from backend.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
-# edge-tts voice names — genuinamente diferentes, neural, gratuito
+# Microsoft Neural voices — genuinamente diferentes por género
 VOICE_MAP = {
-    "male-uk":    "en-GB-RyanNeural",       # Masculino britânico, grave e claro
-    "male-us":    "en-US-GuyNeural",         # Masculino americano, voz de narrador
-    "male-au":    "en-AU-WilliamNeural",     # Masculino australiano
-    "female-us":  "en-US-JennyNeural",       # Feminino americano, natural
-    "female-uk":  "en-GB-SoniaNeural",       # Feminino britânico
-    "female-au":  "en-AU-NatashaNeural",     # Feminino australiano
+    "male-uk":   "en-GB-RyanNeural",
+    "male-us":   "en-US-GuyNeural",
+    "male-au":   "en-AU-WilliamNeural",
+    "female-us": "en-US-JennyNeural",
+    "female-uk": "en-GB-SoniaNeural",
+    "female-au": "en-AU-NatashaNeural",
 }
 DEFAULT_VOICE = "male-uk"
 
-# gTTS fallback tld por voice_id
 GTTS_TLD = {
     "male-uk":   "co.uk",
-    "male-us":   "us",
+    "male-us":   "com",
     "male-au":   "com.au",
     "female-us": "us",
     "female-uk": "co.uk",
@@ -41,37 +41,47 @@ class VoiceoverAgent:
         if not text:
             raise ValueError("Empty script")
 
-        out_dir = os.path.join(settings.TEMP_DIR, job_id)
-        os.makedirs(out_dir, exist_ok=True)
-
+        voice_id = voice_id or DEFAULT_VOICE
         edge_voice = VOICE_MAP.get(voice_id, VOICE_MAP[DEFAULT_VOICE])
+        tld        = GTTS_TLD.get(voice_id, "co.uk")
+
+        out_dir  = os.path.join(settings.TEMP_DIR, job_id)
+        os.makedirs(out_dir, exist_ok=True)
+        raw_path   = os.path.join(out_dir, f"raw_{uuid.uuid4().hex[:6]}.mp3")
+        final_path = os.path.join(out_dir, f"voice_{uuid.uuid4().hex[:6]}.mp3")
+
         logger.info(f"[{job_id}] Voice: {voice_id} → {edge_voice} | {len(text)} chars")
 
-        raw_path = os.path.join(out_dir, f"voice_raw_{uuid.uuid4().hex[:8]}.mp3")
-        final_path = os.path.join(out_dir, f"voice_{uuid.uuid4().hex[:8]}.mp3")
+        # Try edge-tts first
+        edge_ok = await self._try_edge_tts(text, raw_path, edge_voice, job_id)
 
-        # 1. Tentar edge-tts (Microsoft Neural)
-        try:
-            await self._edge_tts(text, raw_path, edge_voice)
-            logger.info(f"[{job_id}] edge-tts ✓ ({edge_voice})")
-        except Exception as e:
-            logger.warning(f"[{job_id}] edge-tts failed: {e} — using gTTS")
-            tld = GTTS_TLD.get(voice_id, "co.uk")
+        if not edge_ok:
+            # Fallback to gTTS
+            logger.warning(f"[{job_id}] edge-tts failed, using gTTS tld={tld}")
             await self._gtts(text, raw_path, tld)
-            logger.info(f"[{job_id}] gTTS fallback ✓ (tld={tld})")
 
-        # 2. Acelerar +15%
+        # Speed up +15%
         await self._speed_up(raw_path, final_path)
-        logger.info(f"[{job_id}] Audio ready: {os.path.getsize(final_path)//1024}KB")
+        logger.info(f"[{job_id}] Audio: {os.path.getsize(final_path)//1024}KB")
         return final_path
 
-    async def _edge_tts(self, text: str, out_path: str, voice: str):
-        """Microsoft Edge TTS — grátis, sem chave, vozes neurais reais."""
-        import edge_tts
-        communicate = edge_tts.Communicate(text, voice)
-        await communicate.save(out_path)
-        if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
-            raise RuntimeError("edge-tts produced empty file")
+    async def _try_edge_tts(self, text: str, out_path: str, voice: str, job_id: str) -> bool:
+        """Returns True if successful."""
+        try:
+            import edge_tts
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(out_path)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                logger.info(f"[{job_id}] edge-tts ✓ ({voice})")
+                return True
+            logger.warning(f"[{job_id}] edge-tts produced empty file")
+            return False
+        except ImportError:
+            logger.warning(f"[{job_id}] edge-tts not installed")
+            return False
+        except Exception as e:
+            logger.warning(f"[{job_id}] edge-tts error: {e}")
+            return False
 
     async def _gtts(self, text: str, out_path: str, tld: str):
         from gtts import gTTS
@@ -81,7 +91,7 @@ class VoiceoverAgent:
         await asyncio.get_event_loop().run_in_executor(None, _run)
 
     async def _speed_up(self, raw: str, out: str):
-        """Aumentar velocidade 15% com FFmpeg atempo=1.15."""
+        """+15% speed via FFmpeg atempo."""
         cmd = ["ffmpeg", "-y", "-i", raw, "-filter:a", "atempo=1.15", "-q:a", "2", out]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -90,8 +100,7 @@ class VoiceoverAgent:
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) < 100:
-            logger.warning(f"speed_up failed ({proc.returncode}), copying raw")
-            import shutil
+            logger.warning(f"speed_up failed, copying raw")
             shutil.copy(raw, out)
         else:
             try:
